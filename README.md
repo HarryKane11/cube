@@ -19,14 +19,25 @@ Needs Node, pnpm and Rust. The team is five role cubes (Researcher, Writer, Buil
 pnpm app
 ```
 
-This builds `src-tauri/target/debug/bundle/macos/Cube.app` and signs it. macOS ties permissions (Screen Recording, Keychain access) to how an app is signed, and an unsigned local build looks like a new app after every rebuild, so the permission would have to be given again each time. To keep it, set up a local signing identity once:
+This builds `src-tauri/target/debug/bundle/macos/Cube.app` and signs it.
+
+macOS ties permissions (Screen Recording, Keychain access) to how an app is signed. An unsigned local build looks like a new app after every rebuild, and macOS would ask for the permission again each time. So the first `pnpm app` on a computer makes a local signing identity and installs the signing tool (`cargo install apple-codesign`, a few minutes, once), and every build after that is signed with it. You allow Screen Recording once and are not asked again.
+
+The identity is a self-signed certificate and key in `~/.cube-signing`, outside the repository. No keychain and no system setting is touched. `CUBE_NO_SIGN=1 pnpm app` leaves a build unsigned.
+
+If macOS keeps asking although Cube is switched on under Privacy & Security > Screen & System Audio Recording, the entry there belongs to an earlier, differently signed build. Remove Cube from that list (select it, press `−`), open Cube, and allow it once more. In a terminal: `tccutil reset ScreenCapture app.cube.desktop`.
+
+### Handing Cube to teammates
 
 ```bash
-cargo install apple-codesign --locked
-bash scripts/setup-signing.sh
+pnpm dmg
 ```
 
-That makes a self-signed certificate and key in `~/.cube-signing`, outside the repository. It touches no keychain and no system setting. Without it `pnpm app` still builds; it just says the build was left unsigned.
+This builds Cube for Apple silicon and Intel, signs it with the same local identity, and writes `src-tauri/target/universal-apple-darwin/release/bundle/dmg/Cube_<version>_universal.dmg`.
+
+- Make every disk image on the computer that holds `~/.cube-signing` (or a copy of it). Images signed with the same identity are the same app to macOS, so a teammate allows Screen Recording once and keeps it across updates. An image signed with another identity is a new app, and they are asked again.
+- The certificate is self-signed, so the first time a teammate opens the app macOS says it cannot verify it. They confirm once under System Settings > Privacy & Security > Open Anyway. Only a paid Apple Developer ID removes that step.
+- A teammate should use either the disk image or their own build from source, not both: the two are signed differently and macOS keeps one permission entry per app name.
 
 ## How it works
 

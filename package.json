@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "app": "tauri build --debug --bundles app && bash scripts/sign-mac.sh",
+    "dmg": "bash scripts/dmg-mac.sh",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
