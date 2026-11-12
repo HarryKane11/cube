@@ -43,7 +43,7 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
             {dm.role} · runs on <EngineLabel agent={dm} />
           </p>
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="truncate text-xs text-muted-foreground">
             {conv.person ? "Direct message. Your cubes answer here only when you name one with @." : <>{members.map((m) => m.name).join(", ")} and you</>}
           </p>
         )}
