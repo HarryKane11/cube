@@ -212,7 +212,7 @@ bash scripts/readme/shoot.sh   # 다른 터미널에서. docs/readme/에 저장
 ## 동작 방식
 
 ```mermaid
-flowchart LR
+flowchart TD
   you([나]) --> conv[채널 또는 DM]
   conv --> router{{Router}}
   router -- "Cube에 대한 질문" --> self[직접 답함]

@@ -212,7 +212,7 @@ Needs `agent-browser` and `cwebp`.
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
   you([You]) --> conv[Channel or DM]
   conv --> router{{Router}}
   router -- "a question about Cube" --> self[answers it]
