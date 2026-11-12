@@ -18,8 +18,23 @@ const SERVICE: &str = "app.cube.desktop.team";
 const ACCOUNT: &str = "membership";
 /// The kinds of event this side will sign. Nothing else can be published through it.
 const KINDS: [&str; 9] = ["conv.put", "conv.add", "conv.remove", "msg.post", "msg.edit", "msg.delete", "agent.put", "agent.drop", "profile.put"];
-/// What the webview may ask of the relay besides publishing.
-const ASKS: [&str; 9] = ["sync", "invite.create", "invite.list", "invite.revoke", "member.remove", "member.role", "member.rename", "conv.members", "settings.set"];
+/// What the webview may ask of the relay besides publishing. `file.touch` says a shared file is being worked on; it is kept nowhere.
+const ASKS: [&str; 10] = ["sync", "invite.create", "invite.list", "invite.revoke", "member.remove", "member.role", "member.rename", "conv.members", "settings.set", "file.touch"];
+/// Questions the webview may put to the relay and get the answer to directly.
+const QUESTIONS: [&str; 2] = ["files.list", "files.history"];
+
+/// Why the relay would not do something: its short code (`stale`, `quota`…) and what it said.
+#[derive(Debug, Clone)]
+pub struct Refusal {
+    pub code: String,
+    pub message: String,
+}
+
+impl Refusal {
+    fn local(message: &str) -> Self {
+        Refusal { code: "offline".into(), message: message.into() }
+    }
+}
 
 /// What is kept in the Keychain once an invite has been accepted.
 #[derive(Serialize, Deserialize, Clone)]
@@ -41,7 +56,9 @@ pub struct Team {
     /// The way to the connection task while one is running.
     out: Mutex<Option<mpsc::UnboundedSender<String>>>,
     /// Events sent and not yet answered, by id.
-    waiting: Mutex<HashMap<String, oneshot::Sender<Result<u64, String>>>>,
+    waiting: Mutex<HashMap<String, oneshot::Sender<Result<u64, Refusal>>>>,
+    /// Questions put to the relay and not yet answered, by the id each was sent under.
+    asked: Mutex<HashMap<String, oneshot::Sender<Value>>>,
 }
 
 #[derive(Serialize)]
@@ -163,28 +180,76 @@ pub async fn team_publish(state: State<'_, Team>, kind: String, body: String) ->
     if !KINDS.contains(&kind.as_str()) {
         return Err("Cube does not publish that kind of event.".into());
     }
-    if body.len() > 64 * 1024 || serde_json::from_str::<Value>(&body).is_err() {
-        return Err("That is too long to share, or not well formed.".into());
+    publish(&state, &kind, &body).await.map_err(|r| r.message)
+}
+
+/// Signs one event with the person's key, sends it, and waits for the relay to take or refuse it.
+pub async fn publish(state: &Team, kind: &str, body: &str) -> Result<u64, Refusal> {
+    if body.len() > 64 * 1024 || serde_json::from_str::<Value>(body).is_err() {
+        return Err(Refusal::local("That is too long to share, or not well formed."));
     }
-    let pin = load_pin().ok_or_else(|| "This Cube has not joined a team.".to_string())?;
-    let event = sign_event(&key_of(&pin)?, now(), &kind, &pin.ws, &body);
+    let pin = load_pin().ok_or_else(|| Refusal::local("This Cube has not joined a team."))?;
+    let event = sign_event(&key_of(&pin).map_err(|e| Refusal::local(&e))?, now(), kind, &pin.ws, body);
     let (tx, rx) = oneshot::channel();
-    state.waiting.lock().map_err(|e| e.to_string())?.insert(event.id.clone(), tx);
-    let sent = match state.out.lock().map_err(|e| e.to_string())?.as_ref() {
+    state.waiting.lock().map_err(|_| Refusal::local("Cube's team connection is in a bad state."))?.insert(event.id.clone(), tx);
+    let sent = match state.out.lock().ok().as_ref().and_then(|o| o.as_ref()) {
         Some(out) => out.send(json!({ "t": "publish", "event": event }).to_string()).is_ok(),
         None => false,
     };
     if !sent {
-        state.waiting.lock().map_err(|e| e.to_string())?.remove(&event.id);
-        return Err("Not connected to the team right now.".into());
+        if let Ok(mut w) = state.waiting.lock() {
+            w.remove(&event.id);
+        }
+        return Err(Refusal::local("Not connected to the team right now."));
     }
     match tokio::time::timeout(Duration::from_secs(15), rx).await {
         Ok(Ok(result)) => result,
         _ => {
-            state.waiting.lock().map_err(|e| e.to_string())?.remove(&event.id);
-            Err("The relay did not confirm in time.".into())
+            if let Ok(mut w) = state.waiting.lock() {
+                w.remove(&event.id);
+            }
+            Err(Refusal::local("The relay did not confirm in time."))
         }
     }
+}
+
+/// Puts a question to the relay and waits for the frame that answers it. The relay echoes the id
+/// a question was sent under; ids made here start with `q-`, which no event id does.
+pub async fn request(state: &Team, mut frame: Value) -> Result<Value, Refusal> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = format!("q-{}-{}", now(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    frame["id"] = Value::String(id.clone());
+    let (tx, rx) = oneshot::channel();
+    state.asked.lock().map_err(|_| Refusal::local("Cube's team connection is in a bad state."))?.insert(id.clone(), tx);
+    let sent = match state.out.lock().ok().as_ref().and_then(|o| o.as_ref()) {
+        Some(out) => out.send(frame.to_string()).is_ok(),
+        None => false,
+    };
+    let answer = if sent { tokio::time::timeout(Duration::from_secs(15), rx).await.ok().and_then(Result::ok) } else { None };
+    if let Ok(mut a) = state.asked.lock() {
+        a.remove(&id);
+    }
+    let v = answer.ok_or_else(|| Refusal::local(if sent { "The relay did not answer in time." } else { "Not connected to the team right now." }))?;
+    if text_of(&v, "t") == "error" {
+        return Err(Refusal { code: text_of(&v, "code"), message: text_of(&v, "message") });
+    }
+    Ok(v)
+}
+
+/// A question from the webview whose answer it gets back directly: what is in a channel's shared folder, and a file's history.
+#[tauri::command]
+pub async fn team_request(state: State<'_, Team>, frame: Value) -> Result<Value, String> {
+    if !QUESTIONS.contains(&text_of(&frame, "t").as_str()) {
+        return Err("Cube does not ask the relay for that.".into());
+    }
+    request(&state, frame).await.map_err(|r| r.message)
+}
+
+/// Where the relay keeps a file with this hash: the pinned relay's own address, over TLS unless it is a local one.
+pub fn blob_url(sha: &str) -> Result<String, String> {
+    let pin = load_pin().ok_or_else(|| "This Cube has not joined a team.".to_string())?;
+    let scheme = if pin.url.starts_with("wss://") { "https" } else { "http" };
+    Ok(format!("{scheme}://{}/blob/{sha}", pin.host))
 }
 
 /// Asks the relay for something that is not an event: history, invites, member changes. The
@@ -285,6 +350,14 @@ async fn session(app: &AppHandle, pin: &Pin, rx: &mut mpsc::UnboundedReceiver<St
                     Some(Err(e)) => return End::Lost(format!("The connection to the relay broke: {e}")),
                 };
                 let Ok(mut v) = serde_json::from_str::<Value>(text.as_str()) else { continue };
+                // The answer to a question asked from this side goes to whoever asked, and nowhere else.
+                let asked = text_of(&v, "id");
+                if asked.starts_with("q-") {
+                    if let Some(tx) = app.try_state::<Team>().and_then(|team| team.asked.lock().ok().and_then(|mut a| a.remove(&asked))) {
+                        let _ = tx.send(v);
+                    }
+                    continue;
+                }
                 match text_of(&v, "t").as_str() {
                     "ready" => status(app, true, ""),
                     "denied" => return End::Refused("This Cube is no longer a member of the team.".into()),
@@ -303,7 +376,7 @@ async fn session(app: &AppHandle, pin: &Pin, rx: &mut mpsc::UnboundedReceiver<St
                         if !id.is_empty() {
                             if let Some(team) = app.try_state::<Team>() {
                                 if let Some(tx) = team.waiting.lock().ok().and_then(|mut w| w.remove(&id)) {
-                                    let _ = tx.send(if text_of(&v, "t") == "ok" { Ok(v.get("seq").and_then(Value::as_u64).unwrap_or(0)) } else { Err(text_of(&v, "message")) });
+                                    let _ = tx.send(if text_of(&v, "t") == "ok" { Ok(v.get("seq").and_then(Value::as_u64).unwrap_or(0)) } else { Err(Refusal { code: text_of(&v, "code"), message: text_of(&v, "message") }) });
                                     continue;
                                 }
                             }
@@ -391,5 +464,9 @@ mod tests {
     fn only_protocol_events_and_requests_are_let_through() {
         assert!(KINDS.contains(&"msg.post") && !KINDS.contains(&"member.remove"));
         assert!(ASKS.contains(&"sync") && !ASKS.contains(&"publish") && !ASKS.contains(&"auth") && !ASKS.contains(&"claim"));
+        // A ticket for the relay's file store is only ever asked for from this side, never by the webview.
+        assert!(!ASKS.contains(&"blob.ticket") && !QUESTIONS.contains(&"blob.ticket"));
+        // File events are signed for a file this side has read or checked itself, not for whatever the webview names.
+        assert!(!KINDS.contains(&"file.put") && !KINDS.contains(&"file.drop"));
     }
 }

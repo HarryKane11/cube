@@ -7,6 +7,10 @@
 //! Who may read a channel is decided here and nowhere else: a channel is
 //! public, or the member is in `conv_members`. Every read that leaves the
 //! relay (`sync_for`, `head_for`, `audience`) applies that rule in SQL.
+//!
+//! Files: the bytes sit on disk under their SHA-256 (see `blob`); this module
+//! keeps which hashes the workspace has (`blobs`), what is at each path of
+//! each channel now (`files`) and everything that ever was (`file_versions`).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -24,6 +28,11 @@ use tracing::info;
 pub const MAX_IDENT_BYTES: usize = 128;
 pub const MAX_CONV_NAME_CHARS: usize = 200;
 pub const MAX_MEMBER_NAME_CHARS: usize = 64;
+/// A file's path in a channel: at most this many bytes and this many segments.
+pub const MAX_FILE_PATH_BYTES: usize = 300;
+pub const MAX_FILE_PATH_SEGMENTS: usize = 8;
+/// The longest agent name a `file.put` may carry.
+pub const MAX_FILE_AGENT_CHARS: usize = 80;
 pub const MAX_INVITE_USES: u64 = 100;
 pub const MAX_INVITE_DAYS: u64 = 30;
 pub const DEFAULT_INVITE_DAYS: u64 = 7;
@@ -32,10 +41,11 @@ pub const CREATED_BY_CLI: &str = "cli";
 
 /// The schema this relay reads and writes, kept in `PRAGMA user_version`.
 /// Version 1 had no per-channel access; its files were never stamped, so a
-/// file that has tables and says 0 is a version 1 file.
-pub const SCHEMA_VERSION: i64 = 2;
+/// file that has tables and says 0 is a version 1 file. Version 2 added
+/// channel member lists; version 3 adds the two tables for files.
+pub const SCHEMA_VERSION: i64 = 3;
 
-/// Version 2, as a new database is created.
+/// The tables of version 2. A new database gets these and `FILE_TABLES`.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS workspace (
     ws              TEXT PRIMARY KEY,
@@ -125,6 +135,54 @@ CREATE TABLE conv_members (
 );
 ";
 
+/// What version 3 adds, for a new database and for one coming from version 2:
+/// the tables for files. Nothing that exists is changed.
+///
+/// `blobs`: the hashes the workspace has bytes for. `files`: what is at each
+/// path of a channel now, one row per path whatever its spelling; a row with
+/// no `sha` is a path whose file was deleted. `file_versions`: one row for
+/// every accepted `file.put` and `file.drop` (no `sha`), never changed.
+const FILE_TABLES: &str = "
+CREATE TABLE blobs (
+    ws          TEXT NOT NULL,
+    sha         TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    uploader    TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (ws, sha)
+);
+CREATE TABLE files (
+    ws          TEXT NOT NULL,
+    conv        TEXT NOT NULL,
+    path_key    TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    sha         TEXT,
+    size        INTEGER NOT NULL,
+    seq         INTEGER NOT NULL,
+    pubkey      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    by_agent    TEXT,
+    by_color    TEXT,
+    PRIMARY KEY (ws, conv, path_key)
+);
+CREATE TABLE file_versions (
+    ws          TEXT NOT NULL,
+    conv        TEXT NOT NULL,
+    path_key    TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    sha         TEXT,
+    size        INTEGER NOT NULL,
+    seq         INTEGER NOT NULL,
+    pubkey      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    by_agent    TEXT,
+    by_color    TEXT,
+    PRIMARY KEY (ws, seq)
+);
+CREATE INDEX file_versions_by_path ON file_versions (ws, conv, path_key, seq);
+CREATE INDEX file_versions_by_sha ON file_versions (ws, conv, sha);
+";
+
 /// True when the member bound to `?2` may read the channel of event row `e`:
 /// the event is of a kind that has no channel, the channel is public, or the
 /// member is in it. Anything else is readable by nobody: a channel with no
@@ -209,6 +267,42 @@ pub struct ConvMembers {
     pub members: Vec<ConvMember>,
 }
 
+/// Who made a file, when an agent did: its name and, optionally, its color.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileAuthor {
+    pub agent: String,
+    pub color: Option<String>,
+}
+
+/// What is at one path of a channel, as `files.list` shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileInfo {
+    pub path: String,
+    /// The file's hash; none for a path whose file was deleted.
+    pub sha: Option<String>,
+    pub size: u64,
+    /// The `file.put` or `file.drop` that made it so, and who signed it when.
+    pub seq: u64,
+    pub pubkey: String,
+    pub created_at: u64,
+    pub by: Option<FileAuthor>,
+    /// Said only for a deleted path, which is listed only when asked for.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
+}
+
+/// One version of the file at a path, as `files.history` shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileVersion {
+    pub sha: Option<String>,
+    pub size: u64,
+    pub seq: u64,
+    pub pubkey: String,
+    pub created_at: u64,
+    pub by: Option<FileAuthor>,
+    pub deleted: bool,
+}
+
 /// One answer to `sync`.
 pub struct SyncPage {
     pub events: Vec<SeqEvent>,
@@ -283,6 +377,10 @@ pub struct NewInvite {
 pub enum OpError {
     /// The request broke a rule; `code` and `message` go back to the client.
     Refused { code: &'static str, message: &'static str },
+    /// A `file.put` or `file.drop` named a `base` that is not what the
+    /// channel has at that path. `current` is what it has: a hash, or empty
+    /// when there is no file. It goes back to the client with the code `stale`.
+    Stale { current: String },
     /// The database failed. Logged, never sent to the client.
     Internal(rusqlite::Error),
 }
@@ -297,6 +395,7 @@ impl fmt::Display for OpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OpError::Refused { code, message } => write!(f, "{code}: {message}"),
+            OpError::Stale { .. } => write!(f, "stale: {STALE_MESSAGE}"),
             OpError::Internal(e) => write!(f, "database error: {e}"),
         }
     }
@@ -305,6 +404,9 @@ impl fmt::Display for OpError {
 impl std::error::Error for OpError {}
 
 pub type OpResult<T> = Result<T, OpError>;
+
+/// What goes with the code `stale`.
+pub const STALE_MESSAGE: &str = "the file at this path is not the one this change started from";
 
 fn refuse<T>(code: &'static str, message: &'static str) -> OpResult<T> {
     Err(OpError::Refused { code, message })
@@ -368,6 +470,96 @@ pub fn is_pubkey(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// A SHA-256 as files are named: 32 bytes of lower-case hex, one spelling per hash.
+pub fn is_sha256(s: &str) -> bool {
+    is_pubkey(s)
+}
+
+/// A file's path in a channel: relative, `/`-separated, short, and made of
+/// plain names only. Nothing that could step out of a folder (`..`, a leading
+/// `/`, a backslash), no hidden names, nothing a file system would rename
+/// (a trailing dot or space), no control characters. `..` is refused anywhere,
+/// also inside a name.
+pub fn valid_file_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > MAX_FILE_PATH_BYTES || path.contains("..") {
+        return false;
+    }
+    if path.chars().any(|c| c == '\\' || c.is_control()) {
+        return false;
+    }
+    let mut segments = 0;
+    path.split('/').all(|segment| {
+        segments += 1;
+        segments <= MAX_FILE_PATH_SEGMENTS
+            && !segment.is_empty()
+            && !segment.starts_with('.')
+            && !segment.ends_with('.')
+            && !segment.ends_with(' ')
+    })
+}
+
+/// What two spellings of one path share: `README.md` and `readme.md` are one file.
+pub fn file_path_key(path: &str) -> String {
+    path.to_lowercase()
+}
+
+const BAD_FILE_PATH: &str = "body.path must be a relative path of plain names, at most 300 bytes and 8 segments";
+const BAD_FILE_BASE: &str = "body.base must be 64 lower-case hex characters, or empty for no file";
+const BAD_FILE_AUTHOR: &str =
+    "body.by needs an agent name of at most 80 characters and, if given, a #rrggbb color";
+
+/// `#rrggbb`.
+fn is_color(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The optional `by` of a file event or a `file.touch`: absent (or null), or
+/// an agent's name with an optional color. `Err` when it is there and shaped
+/// otherwise.
+fn file_author(value: Option<&serde_json::Value>) -> Result<Option<(&str, Option<&str>)>, ()> {
+    let by = match value {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(value) => value.as_object().ok_or(())?,
+    };
+    let agent = str_field(by, "agent")
+        .filter(|a| {
+            !a.trim().is_empty() && a.chars().count() <= MAX_FILE_AGENT_CHARS && !a.chars().any(char::is_control)
+        })
+        .ok_or(())?;
+    let color = match by.get("color") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(value.as_str().filter(|c| is_color(c)).ok_or(())?),
+    };
+    Ok(Some((agent, color)))
+}
+
+/// [`file_author`] for a frame that is passed on rather than stored.
+pub fn clean_file_author(value: Option<&serde_json::Value>) -> Result<Option<FileAuthor>, ()> {
+    Ok(file_author(value)?.map(|(agent, color)| FileAuthor {
+        agent: agent.to_string(),
+        color: color.map(str::to_string),
+    }))
+}
+
+/// The optional `base` of a file event: the hash the writer started from, or
+/// empty for "there is no file at this path". Absent (or null) means the
+/// writer does not ask. `Err` when it is there and neither.
+fn file_base(value: Option<&serde_json::Value>) -> Result<Option<&str>, ()> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value.as_str().filter(|b| b.is_empty() || is_sha256(b)).map(Some).ok_or(()),
+    }
+}
+
+/// What a `file.put` or `file.drop` that passed its rules writes: the new
+/// state of a path. No `sha` is a deletion.
+struct FileChange<'a> {
+    path: &'a str,
+    sha: Option<&'a str>,
+    size: u64,
+    by: Option<(&'a str, Option<&'a str>)>,
+}
+
 /// Trims a display name and checks it; `None` if it is unusable.
 pub fn clean_member_name(name: &str) -> Option<String> {
     let name = name.trim();
@@ -420,9 +612,9 @@ impl Db {
     /// Opens (or creates) the database. A new file is created readable by its
     /// owner only, and a workspace id is made on first start.
     ///
-    /// A version 1 file is brought to version 2 here, in the same transaction
-    /// that reads the workspace id: either all of it happens or the file is
-    /// left as it was and the error says why.
+    /// A file of an earlier version is brought to this one here, step by step
+    /// and in the same transaction that reads the workspace id: either all of
+    /// it happens or the file is left as it was and the error says why.
     pub fn open(path: &Path, now: u64) -> Result<Db, OpenError> {
         #[cfg(unix)]
         {
@@ -452,16 +644,24 @@ impl Db {
         match (version, has_tables) {
             (0, false) => {
                 tx.execute_batch(SCHEMA)?;
+                tx.execute_batch(FILE_TABLES)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
-            (0 | 1, true) => {
-                let rows = migrate_1_to_2(&tx, now).map_err(|e| {
+            (0..=2, true) => {
+                let from = version.max(1);
+                let migrate = || -> Result<usize, OpenError> {
+                    let rows = if from == 1 { migrate_1_to_2(&tx, now)? } else { 0 };
+                    tx.execute_batch(FILE_TABLES)?;
+                    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                    Ok(rows)
+                };
+                let rows = migrate().map_err(|e| {
                     OpenError::Schema(format!(
-                        "cannot bring {} from schema version 1 to {SCHEMA_VERSION}; the file was left unchanged: {e}",
+                        "cannot bring {} from schema version {from} to {SCHEMA_VERSION}; the file was left unchanged: {e}",
                         path.display()
                     ))
                 })?;
-                info!(events = rows, "database migrated from schema version 1 to {SCHEMA_VERSION}");
+                info!(events = rows, "database migrated from schema version {from} to {SCHEMA_VERSION}");
             }
             (SCHEMA_VERSION, true) => {}
             (version, _) => {
@@ -915,6 +1115,8 @@ impl Db {
         let mut redact_earlier = false;
         // The member a `conv.add` or `conv.remove` names.
         let mut target: Option<&str> = None;
+        // What a `file.put` or `file.drop` makes of its path.
+        let mut file: Option<FileChange<'_>> = None;
 
         match event.kind.as_str() {
             "conv.put" => {
@@ -1092,6 +1294,72 @@ impl Db {
                 )?;
                 target = Some(member);
             }
+            // A file that was uploaded before becomes the current one at a path of
+            // the channel. The event carries only the hash; the bytes are fetched
+            // with a ticket by whoever can read the channel.
+            "file.put" => {
+                let Some(path) = str_field(obj, "path").filter(|p| valid_file_path(p)) else {
+                    return refuse("bad_body", BAD_FILE_PATH);
+                };
+                let Some(sha) = str_field(obj, "sha").filter(|s| is_sha256(s)) else {
+                    return refuse("bad_body", "body.sha must be 64 lower-case hex characters");
+                };
+                let Some(size) = obj.get("size").and_then(serde_json::Value::as_u64) else {
+                    return refuse("bad_body", "body.size must be a whole number of bytes");
+                };
+                let Ok(base) = file_base(obj.get("base")) else {
+                    return refuse("bad_body", BAD_FILE_BASE);
+                };
+                let Ok(by) = file_author(obj.get("by")) else {
+                    return refuse("bad_body", BAD_FILE_AUTHOR);
+                };
+                // Before anything is said about the file: whether a hash is
+                // known is not for someone who cannot read the channel.
+                let Some(found) = readable_conv(&tx, &ws, conv, &event.pubkey)? else {
+                    return no_conv();
+                };
+                if found.archived {
+                    return refuse("archived", "the channel is archived");
+                }
+                if blob_size_in(&tx, &ws, sha)? != Some(size) {
+                    return refuse("not_found", "no uploaded file has this sha and size");
+                }
+                let current = live_file_in(&tx, &ws, conv, path)?;
+                if current.as_deref() == Some(sha) {
+                    return refuse("unchanged", "the channel already has this file at this path");
+                }
+                // The writer said what they started from, and someone else got there first.
+                if base.is_some_and(|base| base != current.as_deref().unwrap_or("")) {
+                    return Err(OpError::Stale { current: current.unwrap_or_default() });
+                }
+                file = Some(FileChange { path, sha: Some(sha), size, by });
+            }
+            // The file at a path is deleted for everyone. Its earlier versions,
+            // and their bytes, stay; a later `file.put` brings the path back.
+            "file.drop" => {
+                let Some(path) = str_field(obj, "path").filter(|p| valid_file_path(p)) else {
+                    return refuse("bad_body", BAD_FILE_PATH);
+                };
+                let Ok(base) = file_base(obj.get("base")) else {
+                    return refuse("bad_body", BAD_FILE_BASE);
+                };
+                let Ok(by) = file_author(obj.get("by")) else {
+                    return refuse("bad_body", BAD_FILE_AUTHOR);
+                };
+                let Some(found) = readable_conv(&tx, &ws, conv, &event.pubkey)? else {
+                    return no_conv();
+                };
+                if found.archived {
+                    return refuse("archived", "the channel is archived");
+                }
+                let Some(current) = live_file_in(&tx, &ws, conv, path)? else {
+                    return refuse("not_found", "the channel has no file at this path");
+                };
+                if base.is_some_and(|base| base != current) {
+                    return Err(OpError::Stale { current });
+                }
+                file = Some(FileChange { path, sha: None, size: 0, by });
+            }
             // A member offers one of their sub-agents to the team, or takes the offer back. The
             // relay only checks the shape: an offer belongs to whoever signed it, and clients key
             // it by that key, so nobody can replace or withdraw another member's.
@@ -1146,6 +1414,37 @@ impl Db {
                 target
             ],
         )?;
+        if let Some(FileChange { path, sha, size, by }) = file {
+            // The same row goes to the history, and takes the place of whatever
+            // the path held, in any spelling.
+            for statement in [
+                "INSERT INTO file_versions (ws, conv, path_key, path, sha, size, seq, pubkey, created_at, by_agent, by_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO files (ws, conv, path_key, path, sha, size, seq, pubkey, created_at, by_agent, by_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT (ws, conv, path_key) DO UPDATE SET
+                    path = excluded.path, sha = excluded.sha, size = excluded.size, seq = excluded.seq,
+                    pubkey = excluded.pubkey, created_at = excluded.created_at,
+                    by_agent = excluded.by_agent, by_color = excluded.by_color",
+            ] {
+                tx.execute(
+                    statement,
+                    params![
+                        ws,
+                        conv,
+                        file_path_key(path),
+                        path,
+                        sha,
+                        to_i64(size),
+                        seq,
+                        event.pubkey,
+                        to_i64(event.created_at),
+                        by.map(|b| b.0),
+                        by.and_then(|b| b.1)
+                    ],
+                )?;
+            }
+        }
         if event.kind == "profile.put" {
             // Only the latest picture of a member means anything: earlier ones are emptied, so
             // they are neither kept nor sent to anyone again.
@@ -1229,6 +1528,181 @@ impl Db {
         })?;
         let members = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(ConvMembers { private: found.private, members })
+    }
+
+    // ---- files ------------------------------------------------------------
+
+    /// Whether `reader` is a member who may read `conv` right now.
+    pub fn can_read(&self, reader: &str, conv: &str) -> rusqlite::Result<bool> {
+        Ok(role_in(&self.conn, &self.ws, reader)?.is_some()
+            && readable_conv(&self.conn, &self.ws, conv, reader)?.is_some())
+    }
+
+    /// The size of an uploaded file, if the workspace has that hash.
+    pub fn blob_size(&self, sha: &str) -> rusqlite::Result<Option<u64>> {
+        blob_size_in(&self.conn, &self.ws, sha)
+    }
+
+    /// Judges a request to upload `size` bytes with hash `sha` for a channel.
+    /// Returns whether the workspace already has exactly that file, in which
+    /// case nothing needs to be sent.
+    ///
+    /// The quota is checked here against what is stored, and again when the
+    /// upload is stored ([`Db::store_blob`]): uploads under way at the same
+    /// time are not counted yet.
+    pub fn check_upload(
+        &self,
+        caller: &str,
+        conv: &str,
+        sha: &str,
+        size: u64,
+        max_bytes: u64,
+        quota_bytes: u64,
+    ) -> OpResult<bool> {
+        let Some(found) = readable_conv(&self.conn, &self.ws, conv, caller)? else {
+            return no_conv();
+        };
+        if found.archived {
+            return refuse("archived", "the channel is archived");
+        }
+        if size > max_bytes {
+            return refuse("too_big", "the file is larger than this relay accepts");
+        }
+        if blob_size_in(&self.conn, &self.ws, sha)? == Some(size) {
+            return Ok(true);
+        }
+        if blob_usage_without(&self.conn, &self.ws, sha)?.saturating_add(size) > quota_bytes {
+            return refuse("quota", "the workspace's storage for files is full");
+        }
+        Ok(false)
+    }
+
+    /// Judges a request to download `sha` through `conv`: the caller must be
+    /// able to read the channel, and the hash must be, or have been, a version
+    /// of a file in it. A hash known from another channel gets nothing here.
+    /// Returns the file's size.
+    pub fn check_download(&self, caller: &str, conv: &str, sha: &str) -> OpResult<u64> {
+        if readable_conv(&self.conn, &self.ws, conv, caller)?.is_none() {
+            return no_conv();
+        }
+        let size: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT size FROM file_versions WHERE ws = ?1 AND conv = ?2 AND sha = ?3 LIMIT 1",
+                params![self.ws, conv, sha],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match size {
+            Some(size) => Ok(to_u64(size)),
+            None => refuse("not_found", "the channel never had a file with this sha"),
+        }
+    }
+
+    /// Records an uploaded file whose bytes were verified against `sha`. A
+    /// hash the workspace already has is left as it is. Refused with `quota`
+    /// when it would take the stored files over `quota_bytes`, and with
+    /// `not_member` when the uploader left the team while uploading. Returns
+    /// whether a row was added.
+    pub fn store_blob(&mut self, sha: &str, size: u64, uploader: &str, now: u64, quota_bytes: u64) -> OpResult<bool> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if role_in(&tx, &self.ws, uploader)?.is_none() {
+            return refuse("not_member", "not a member");
+        }
+        if blob_size_in(&tx, &self.ws, sha)?.is_some() {
+            return Ok(false);
+        }
+        if blob_usage_without(&tx, &self.ws, sha)?.saturating_add(size) > quota_bytes {
+            return refuse("quota", "the workspace's storage for files is full");
+        }
+        tx.execute(
+            "INSERT INTO blobs (ws, sha, size, uploader, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![self.ws, sha, to_i64(size), uploader, to_i64(now)],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Takes back a row [`Db::store_blob`] just added, when the file could not
+    /// be put in place. Never used for a hash a channel refers to.
+    pub fn forget_blob(&mut self, sha: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM blobs WHERE ws = ?1 AND sha = ?2
+             AND NOT EXISTS (SELECT 1 FROM file_versions v WHERE v.ws = ?1 AND v.sha = ?2)",
+            params![self.ws, sha],
+        )?;
+        Ok(())
+    }
+
+    /// What is at each path of a channel, for someone who may read it: the
+    /// files that are there, and with `with_deleted` also the paths whose
+    /// file was deleted.
+    pub fn files(&self, caller: &str, conv: &str, with_deleted: bool) -> OpResult<Vec<FileInfo>> {
+        if readable_conv(&self.conn, &self.ws, conv, caller)?.is_none() {
+            return no_conv();
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT path, sha, size, seq, pubkey, created_at, by_agent, by_color FROM files
+             WHERE ws = ?1 AND conv = ?2 AND (?3 OR sha IS NOT NULL) ORDER BY path_key",
+        )?;
+        let rows = stmt.query_map(params![self.ws, conv, with_deleted], |r| {
+            let sha: Option<String> = r.get(1)?;
+            Ok(FileInfo {
+                path: r.get(0)?,
+                deleted: sha.is_none(),
+                sha,
+                size: to_u64(r.get(2)?),
+                seq: to_u64(r.get(3)?),
+                pubkey: r.get(4)?,
+                created_at: to_u64(r.get(5)?),
+                by: row_author(r, 6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The versions of the file at a path, newest first and at most `limit`,
+    /// for someone who may read the channel. A path that never held a file
+    /// has none.
+    pub fn file_history(&self, caller: &str, conv: &str, path: &str, limit: usize) -> OpResult<Vec<FileVersion>> {
+        if readable_conv(&self.conn, &self.ws, conv, caller)?.is_none() {
+            return no_conv();
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT sha, size, seq, pubkey, created_at, by_agent, by_color FROM file_versions
+             WHERE ws = ?1 AND conv = ?2 AND path_key = ?3 ORDER BY seq DESC LIMIT ?4",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map(params![self.ws, conv, file_path_key(path), limit], |r| {
+            let sha: Option<String> = r.get(0)?;
+            Ok(FileVersion {
+                deleted: sha.is_none(),
+                sha,
+                size: to_u64(r.get(1)?),
+                seq: to_u64(r.get(2)?),
+                pubkey: r.get(3)?,
+                created_at: to_u64(r.get(4)?),
+                by: row_author(r, 5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The members who may read `conv` right now, for something that is
+    /// passed on to them without being stored. Refused for a caller who may
+    /// not read it themselves.
+    pub fn readers(&self, caller: &str, conv: &str) -> OpResult<Audience> {
+        let Some(found) = readable_conv(&self.conn, &self.ws, conv, caller)? else {
+            return no_conv();
+        };
+        if !found.private {
+            return Ok(Audience::Everyone);
+        }
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT pubkey FROM conv_members WHERE ws = ?1 AND conv = ?2")?;
+        let rows = stmt.query_map(params![self.ws, conv], |r| r.get::<_, String>(0))?;
+        Ok(Audience::Only(rows.collect::<rusqlite::Result<HashSet<String>>>()?))
     }
 
     /// One page of what `reader` is served after `after`, oldest first: at
@@ -1327,7 +1801,8 @@ impl Db {
 }
 
 /// Brings a version 1 database to version 2 inside the caller's transaction
-/// and returns how many event rows it went through.
+/// and returns how many event rows it went through. The caller stamps the
+/// version once every step is done.
 ///
 /// Every channel that exists becomes a public one with its creator as its
 /// first member, and every event row is given the channel its body names. A
@@ -1382,7 +1857,6 @@ fn migrate_1_to_2(tx: &Transaction<'_>, now: u64) -> Result<usize, OpenError> {
          WHERE EXISTS (SELECT 1 FROM members m WHERE m.ws = c.ws AND m.pubkey = c.creator)",
         params![to_i64(now)],
     )?;
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(seen)
 }
 
@@ -1449,6 +1923,44 @@ fn readable_conv(conn: &Connection, ws: &str, conv: &str, reader: &str) -> rusql
         Some(found) if !found.private || in_conv(conn, ws, conv, reader)? => Ok(Some(found)),
         _ => Ok(None),
     }
+}
+
+/// The hash of the file at a path of a channel, in any spelling of the path;
+/// `None` when there is none or it was deleted.
+fn live_file_in(conn: &Connection, ws: &str, conv: &str, path: &str) -> rusqlite::Result<Option<String>> {
+    let sha: Option<Option<String>> = conn
+        .query_row(
+            "SELECT sha FROM files WHERE ws = ?1 AND conv = ?2 AND path_key = ?3",
+            params![ws, conv, file_path_key(path)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(sha.flatten())
+}
+
+/// The `by_agent` and `by_color` columns, starting at column `at`.
+fn row_author(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<FileAuthor>> {
+    let agent: Option<String> = r.get(at)?;
+    let color: Option<String> = r.get(at + 1)?;
+    Ok(agent.map(|agent| FileAuthor { agent, color }))
+}
+
+fn blob_size_in(conn: &Connection, ws: &str, sha: &str) -> rusqlite::Result<Option<u64>> {
+    let size: Option<i64> = conn
+        .query_row("SELECT size FROM blobs WHERE ws = ?1 AND sha = ?2", params![ws, sha], |r| r.get(0))
+        .optional()?;
+    Ok(size.map(to_u64))
+}
+
+/// The bytes all stored files take, not counting `sha` (which is about to be
+/// stored, or stored again).
+fn blob_usage_without(conn: &Connection, ws: &str, sha: &str) -> rusqlite::Result<u64> {
+    let used: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(size), 0) FROM blobs WHERE ws = ?1 AND sha <> ?2",
+        params![ws, sha],
+        |r| r.get(0),
+    )?;
+    Ok(to_u64(used))
 }
 
 /// Puts a member in a channel; someone already in it is left as they were.
@@ -1615,9 +2127,10 @@ mod tests {
         db.publish(&event, NOW, 600)
     }
 
-    fn code(r: OpResult<Published>) -> &'static str {
+    fn code<T: fmt::Debug>(r: OpResult<T>) -> &'static str {
         match r {
             Err(OpError::Refused { code, .. }) => code,
+            Err(OpError::Stale { .. }) => "stale",
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -2292,6 +2805,444 @@ mod tests {
         assert!(f.db.create_invite_as(&a, terms(Role::Member, Some("p")), NOW).is_ok());
     }
 
+    // ---- files ------------------------------------------------------------------------
+
+    const NO_QUOTA: u64 = u64::MAX;
+
+    /// Records `content` as uploaded by `who` and returns its hash and size,
+    /// as the relay does once an upload was verified.
+    fn uploaded(db: &mut Db, who: &SigningKey, content: &str) -> (String, u64) {
+        let (sha, size) = (sha256_hex(content.as_bytes()), content.len() as u64);
+        db.store_blob(&sha, size, &pk(who), NOW, NO_QUOTA).unwrap();
+        (sha, size)
+    }
+
+    fn put_file(db: &mut Db, key: &SigningKey, conv: &str, path: &str, file: &(String, u64)) -> OpResult<Published> {
+        publish(db, key, "file.put", serde_json::json!({"conv": conv, "path": path, "sha": file.0, "size": file.1}))
+    }
+
+    /// What a `stale` refusal says the channel has.
+    fn stale(r: OpResult<Published>) -> String {
+        match r {
+            Err(OpError::Stale { current }) => current,
+            other => panic!("expected stale, got {other:?}"),
+        }
+    }
+
+    fn paths(files: &[FileInfo]) -> Vec<&str> {
+        files.iter().map(|f| f.path.as_str()).collect()
+    }
+
+    #[test]
+    fn file_paths() {
+        for good in [
+            "README.md",
+            "docs/plan.md",
+            "a/b/c/d/e/f/g/h",
+            "보고서/1분기 실적.xlsx",
+            "notes (final) v2.txt",
+            "a b/c d",
+            "archive.tar.gz",
+            "~draft",
+            &"x".repeat(MAX_FILE_PATH_BYTES),
+        ] {
+            assert!(valid_file_path(good), "{good}");
+        }
+        for bad in [
+            "",
+            // Stepping out of the folder, or naming a place outside it.
+            "..",
+            "../secret",
+            "a/../b",
+            "a/..",
+            "/etc/passwd",
+            "a//b",
+            "a/",
+            "a\\b",
+            "..\\windows",
+            "a..b",
+            // Hidden names and the folder itself.
+            ".",
+            "./a",
+            ".env",
+            "a/.git/config",
+            // What a file system would rename or refuse.
+            "name.",
+            "name ",
+            "dir /file",
+            "dir./file",
+            "a\nb",
+            "a\tb",
+            "a\0b",
+            "a\u{7f}b",
+            "a\u{85}b",
+            // Too deep, too long.
+            "a/b/c/d/e/f/g/h/i",
+            &"x".repeat(MAX_FILE_PATH_BYTES + 1),
+            &"가".repeat(101),
+        ] {
+            assert!(!valid_file_path(bad), "{bad:?}");
+        }
+        // One file per path, whatever its capitals, in any script.
+        assert_eq!(file_path_key("Docs/README.md"), file_path_key("docs/readme.MD"));
+        assert_eq!(file_path_key("ÄRGER/Straße.TXT"), "ärger/straße.txt");
+        assert_ne!(file_path_key("a/b"), file_path_key("a/c"));
+    }
+
+    #[test]
+    fn a_file_is_put_replaced_and_listed() {
+        let mut f = fixture();
+        let ann = join(&mut f.db, Role::Owner, "Ann");
+        let bob = join(&mut f.db, Role::Member, "Bob");
+        publish(&mut f.db, &ann, "conv.put", serde_json::json!({"conv": "c", "name": "C"})).unwrap();
+        let v1 = uploaded(&mut f.db, &ann, "first");
+        let v2 = uploaded(&mut f.db, &bob, "second");
+
+        // The bytes must have been uploaded, with exactly that size.
+        let never = (sha256_hex(b"never sent"), 10);
+        assert_eq!(code(put_file(&mut f.db, &ann, "c", "README.md", &never)), "not_found");
+        assert_eq!(code(put_file(&mut f.db, &ann, "c", "README.md", &(v1.0.clone(), v1.1 + 1))), "not_found");
+        assert!(f.db.files(&pk(&ann), "c", true).unwrap().is_empty());
+
+        assert_eq!(put_file(&mut f.db, &ann, "c", "README.md", &v1).unwrap().seq, 2);
+        // The same file at the same path, in any spelling, is not a change, and nothing is stored.
+        assert_eq!(code(put_file(&mut f.db, &bob, "c", "README.md", &v1)), "unchanged");
+        assert_eq!(code(put_file(&mut f.db, &bob, "c", "readme.MD", &v1)), "unchanged");
+        assert_eq!(f.db.head().unwrap(), 2);
+        // The same file at another path is another entry.
+        assert_eq!(put_file(&mut f.db, &bob, "c", "docs/copy.md", &v1).unwrap().seq, 3);
+
+        // Another spelling of the path replaces the entry and takes its place in the listing.
+        let body = serde_json::json!({
+            "conv": "c", "path": "Readme.md", "sha": v2.0, "size": v2.1,
+            "by": {"agent": "Builder", "color": "#1FA864"},
+        });
+        assert_eq!(publish(&mut f.db, &bob, "file.put", body).unwrap().seq, 4);
+        let files = f.db.files(&pk(&ann), "c", false).unwrap();
+        assert_eq!(paths(&files), vec!["docs/copy.md", "Readme.md"]);
+        assert_eq!(
+            files[1],
+            FileInfo {
+                path: "Readme.md".to_string(),
+                sha: Some(v2.0.clone()),
+                size: v2.1,
+                seq: 4,
+                pubkey: pk(&bob),
+                created_at: NOW,
+                by: Some(FileAuthor { agent: "Builder".to_string(), color: Some("#1FA864".to_string()) }),
+                deleted: false,
+            }
+        );
+        assert_eq!((files[0].seq, files[0].by.clone()), (3, None));
+        // As JSON: `deleted` is said only when it is true, `by` is null without an agent.
+        assert_eq!(
+            serde_json::to_value(&files[0]).unwrap(),
+            serde_json::json!({
+                "path": "docs/copy.md", "sha": v1.0, "size": v1.1, "seq": 3,
+                "pubkey": pk(&bob), "created_at": NOW, "by": null,
+            })
+        );
+
+        // The events are the channel's, so they are served by the channel's rule.
+        let page = f.db.sync_for(&pk(&bob), 0, Some("c"), 200, usize::MAX).unwrap();
+        assert_eq!(seqs(&page), vec![1, 2, 3, 4]);
+        assert!(matches!(f.db.audience(4).unwrap(), Audience::Everyone));
+        // A retry of an accepted put is answered as the same event, not as `unchanged`.
+        let again = sign_event(&bob, NOW, "file.put", f.db.ws(), &page.events[3].event.body);
+        assert_eq!(f.db.publish(&again, NOW, 600).unwrap(), Published { seq: 4, fresh: false });
+
+        // An archived channel takes no new files; what it has can still be read.
+        publish(&mut f.db, &ann, "conv.put", serde_json::json!({"conv": "c", "name": "C", "archived": true})).unwrap();
+        assert_eq!(code(put_file(&mut f.db, &ann, "c", "late.md", &v1)), "archived");
+        assert_eq!(code(publish(&mut f.db, &ann, "file.drop", serde_json::json!({"conv": "c", "path": "Readme.md"}))), "archived");
+        assert_eq!(code(f.db.check_upload(&pk(&ann), "c", &never.0, 10, 100, NO_QUOTA)), "archived");
+        assert_eq!(f.db.check_download(&pk(&ann), "c", &v2.0).unwrap(), v2.1);
+        assert_eq!(f.db.files(&pk(&ann), "c", false).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn file_events_must_have_the_documented_shape() {
+        let mut f = fixture();
+        let ann = join(&mut f.db, Role::Owner, "Ann");
+        publish(&mut f.db, &ann, "conv.put", serde_json::json!({"conv": "c", "name": "C"})).unwrap();
+        let (sha, size) = uploaded(&mut f.db, &ann, "content");
+        let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        let long_name = "n".repeat(MAX_FILE_AGENT_CHARS + 1);
+
+        let mut bad = vec![
+            serde_json::json!({"conv": "c", "sha": sha, "size": size}),
+            serde_json::json!({"conv": "c", "path": 7, "sha": sha, "size": size}),
+            serde_json::json!({"conv": "c", "path": "a.md", "size": size}),
+            serde_json::json!({"conv": "c", "path": "a.md", "sha": sha.to_uppercase(), "size": size}),
+            serde_json::json!({"conv": "c", "path": "a.md", "sha": &sha[..63], "size": size}),
+            serde_json::json!({"conv": "c", "path": "a.md", "sha": sha}),
+            serde_json::json!({"conv": "c", "path": "a.md", "sha": sha, "size": "7"}),
+            serde_json::json!({"conv": "c", "path": "a.md", "sha": sha, "size": -1}),
+            serde_json::json!({"conv": "c", "path": "a.md", "sha": sha, "size": 7.5}),
+            serde_json::json!({"conv": "c", "path": "a.md", "sha": sha, "size": size, "base": "abc"}),
+            serde_json::json!({"conv": "c", "path": "a.md", "sha": sha, "size": size, "base": 1}),
+            serde_json::json!({"conv": "c", "path": "a.md", "sha": sha, "size": size, "base": sha.to_uppercase()}),
+        ];
+        for by in [
+            json(r#""Builder""#),
+            json(r#"{}"#),
+            json(r#"{"agent": ""}"#),
+            json(r#"{"agent": "  "}"#),
+            json(r#"{"agent": 3}"#),
+            json(r#"{"agent": "a\nb"}"#),
+            serde_json::json!({"agent": long_name}),
+            json(r##"{"agent": "Builder", "color": "red"}"##),
+            json(r##"{"agent": "Builder", "color": "#12345"}"##),
+            json(r##"{"agent": "Builder", "color": "#12345g"}"##),
+            json(r##"{"agent": "Builder", "color": 1}"##),
+        ] {
+            bad.push(serde_json::json!({"conv": "c", "path": "a.md", "sha": sha, "size": size, "by": by}));
+        }
+        for path in ["../a", "a/../b", ".env", "a\\b", "a\nb", "/a", "a/", "a.", "a/b/c/d/e/f/g/h/i", &"x".repeat(301)] {
+            bad.push(serde_json::json!({"conv": "c", "path": path, "sha": sha, "size": size}));
+        }
+        for body in bad {
+            assert_eq!(code(publish(&mut f.db, &ann, "file.put", body.clone())), "bad_body", "{body}");
+        }
+        for body in [
+            serde_json::json!({"conv": "c"}),
+            serde_json::json!({"conv": "c", "path": "../a"}),
+            serde_json::json!({"conv": "c", "path": "a.md", "base": "nope"}),
+            serde_json::json!({"conv": "c", "path": "a.md", "by": {"agent": ""}}),
+        ] {
+            assert_eq!(code(publish(&mut f.db, &ann, "file.drop", body.clone())), "bad_body", "{body}");
+        }
+        assert_eq!(f.db.head().unwrap(), 1);
+
+        // What is optional may be left out or null; the longest name and either case of a color are fine.
+        let name = "n".repeat(MAX_FILE_AGENT_CHARS);
+        for (path, by, base) in [
+            ("a.md", serde_json::Value::Null, serde_json::Value::Null),
+            ("b.md", serde_json::json!({"agent": name}), serde_json::json!("")),
+            ("c.md", serde_json::json!({"agent": "Builder", "color": "#aBc123"}), serde_json::Value::Null),
+            ("d.md", serde_json::json!({"agent": "Builder", "color": null}), serde_json::Value::Null),
+        ] {
+            let body = serde_json::json!({"conv": "c", "path": path, "sha": sha, "size": size, "by": by, "base": base});
+            assert!(publish(&mut f.db, &ann, "file.put", body).is_ok(), "{path}");
+        }
+        // An empty file is a file.
+        let empty = uploaded(&mut f.db, &ann, "");
+        assert!(put_file(&mut f.db, &ann, "c", "empty.txt", &empty).is_ok());
+    }
+
+    #[test]
+    fn a_writer_can_say_what_their_copy_started_from() {
+        let mut f = fixture();
+        let ann = join(&mut f.db, Role::Owner, "Ann");
+        let bob = join(&mut f.db, Role::Member, "Bob");
+        publish(&mut f.db, &ann, "conv.put", serde_json::json!({"conv": "c", "name": "C"})).unwrap();
+        let (v1, v2, v3) = (
+            uploaded(&mut f.db, &ann, "one"),
+            uploaded(&mut f.db, &ann, "two"),
+            uploaded(&mut f.db, &ann, "three"),
+        );
+        let put = |db: &mut Db, key: &SigningKey, file: &(String, u64), base: &str| {
+            let body = serde_json::json!({"conv": "c", "path": "plan.md", "sha": file.0, "size": file.1, "base": base});
+            publish(db, key, "file.put", body)
+        };
+        let drop_file = |db: &mut Db, key: &SigningKey, base: Option<&str>| {
+            let mut body = serde_json::json!({"conv": "c", "path": "PLAN.md"});
+            if let Some(base) = base {
+                body["base"] = serde_json::json!(base);
+            }
+            publish(db, key, "file.drop", body)
+        };
+
+        // Nothing there yet: "" is right, a hash is not, and a drop finds nothing.
+        assert_eq!(stale(put(&mut f.db, &ann, &v1, &v2.0)), "");
+        assert_eq!(code(drop_file(&mut f.db, &ann, None)), "not_found");
+        assert_eq!(code(drop_file(&mut f.db, &ann, Some(""))), "not_found");
+        assert_eq!(put(&mut f.db, &ann, &v1, "").unwrap().seq, 2);
+
+        // Ann and Bob both start from v1. Ann gets there first; Bob is told what is there now.
+        assert_eq!(put(&mut f.db, &ann, &v2, &v1.0).unwrap().seq, 3);
+        assert_eq!(stale(put(&mut f.db, &bob, &v3, &v1.0)), v2.0);
+        // "I believe there is no file" against one that is there.
+        assert_eq!(stale(put(&mut f.db, &bob, &v3, "")), v2.0);
+        // `unchanged` is judged first: Bob's copy is what the channel has, whatever he started from.
+        assert_eq!(code(put(&mut f.db, &bob, &v2, &v1.0)), "unchanged");
+        assert_eq!(code(put(&mut f.db, &bob, &v2, "")), "unchanged");
+        // Without `base` nothing is asked.
+        assert_eq!(put_file(&mut f.db, &bob, "c", "plan.md", &v3).unwrap().seq, 4);
+
+        // The same for a deletion.
+        assert_eq!(stale(drop_file(&mut f.db, &ann, Some(&v2.0))), v3.0);
+        assert_eq!(stale(drop_file(&mut f.db, &ann, Some(""))), v3.0);
+        assert_eq!(f.db.head().unwrap(), 4);
+        assert_eq!(drop_file(&mut f.db, &ann, Some(&v3.0)).unwrap().seq, 5);
+        // Gone: nothing to delete, a hash is stale against it, "" is right again.
+        assert_eq!(code(drop_file(&mut f.db, &ann, None)), "not_found");
+        assert_eq!(stale(put(&mut f.db, &bob, &v1, &v3.0)), "");
+        assert_eq!(put(&mut f.db, &bob, &v1, "").unwrap().seq, 6);
+        assert_eq!(f.db.head().unwrap(), 6);
+    }
+
+    #[test]
+    fn a_deleted_file_keeps_its_history_and_can_come_back() {
+        let mut f = fixture();
+        let ann = join(&mut f.db, Role::Owner, "Ann");
+        let bob = join(&mut f.db, Role::Member, "Bob");
+        publish(&mut f.db, &ann, "conv.put", serde_json::json!({"conv": "c", "name": "C"})).unwrap();
+        publish(&mut f.db, &ann, "conv.put", serde_json::json!({"conv": "other", "name": "Other"})).unwrap();
+        let (v1, v2) = (uploaded(&mut f.db, &ann, "one"), uploaded(&mut f.db, &ann, "two"));
+        let elsewhere = uploaded(&mut f.db, &ann, "in another channel");
+        put_file(&mut f.db, &ann, "other", "plan.md", &elsewhere).unwrap();
+
+        assert_eq!(put_file(&mut f.db, &ann, "c", "Plan.md", &v1).unwrap().seq, 4);
+        assert_eq!(put_file(&mut f.db, &bob, "c", "plan.md", &v2).unwrap().seq, 5);
+        assert_eq!(put_file(&mut f.db, &ann, "c", "keep.md", &v1).unwrap().seq, 6);
+        let body = serde_json::json!({"conv": "c", "path": "PLAN.MD", "by": {"agent": "Cleaner"}});
+        assert_eq!(publish(&mut f.db, &bob, "file.drop", body).unwrap().seq, 7);
+
+        // The listing shows what is there; the deleted path only when asked for.
+        assert_eq!(paths(&f.db.files(&pk(&ann), "c", false).unwrap()), vec!["keep.md"]);
+        let all = f.db.files(&pk(&ann), "c", true).unwrap();
+        assert_eq!(paths(&all), vec!["keep.md", "PLAN.MD"]);
+        assert_eq!(
+            serde_json::to_value(&all[1]).unwrap(),
+            serde_json::json!({
+                "path": "PLAN.MD", "sha": null, "size": 0, "seq": 7, "pubkey": pk(&bob), "created_at": NOW,
+                "by": {"agent": "Cleaner", "color": null}, "deleted": true,
+            })
+        );
+
+        // The history has every version, newest first, the deletion among them.
+        let history = f.db.file_history(&pk(&ann), "c", "plan.md", 100).unwrap();
+        let rows: Vec<(u64, Option<&str>, bool)> = history.iter().map(|v| (v.seq, v.sha.as_deref(), v.deleted)).collect();
+        assert_eq!(rows, vec![(7, None, true), (5, Some(v2.0.as_str()), false), (4, Some(v1.0.as_str()), false)]);
+        assert_eq!(
+            serde_json::to_value(&history[1]).unwrap(),
+            serde_json::json!({
+                "sha": v2.0, "size": v2.1, "seq": 5, "pubkey": pk(&bob), "created_at": NOW, "by": null, "deleted": false,
+            })
+        );
+        assert_eq!(f.db.file_history(&pk(&ann), "c", "plan.md", 2).unwrap().len(), 2);
+        // A path that never held a file has no history; another channel's is its own.
+        assert!(f.db.file_history(&pk(&ann), "c", "never.md", 100).unwrap().is_empty());
+        assert!(f.db.file_history(&pk(&ann), "c", "../../etc/passwd", 100).unwrap().is_empty());
+        assert_eq!(f.db.file_history(&pk(&ann), "other", "plan.md", 100).unwrap().len(), 1);
+
+        // Every version that was ever in the channel can still be fetched, deleted or
+        // replaced; a hash that is only in another channel cannot be fetched through this one.
+        assert_eq!(f.db.check_download(&pk(&bob), "c", &v1.0).unwrap(), v1.1);
+        assert_eq!(f.db.check_download(&pk(&bob), "c", &v2.0).unwrap(), v2.1);
+        assert_eq!(code(f.db.check_download(&pk(&bob), "c", &elsewhere.0)), "not_found");
+        assert_eq!(f.db.check_download(&pk(&bob), "other", &elsewhere.0).unwrap(), elsewhere.1);
+        assert_eq!(code(f.db.check_download(&pk(&bob), "other", &v2.0)), "not_found");
+        // The bytes stay as well: nothing to send again when an old version is put back.
+        assert!(f.db.check_upload(&pk(&bob), "c", &v1.0, v1.1, 100, NO_QUOTA).unwrap());
+
+        // Putting an old version back restores the path, under the spelling of the put.
+        assert_eq!(put_file(&mut f.db, &ann, "c", "plan.md", &v1).unwrap().seq, 8);
+        let files = f.db.files(&pk(&ann), "c", true).unwrap();
+        assert_eq!(paths(&files), vec!["keep.md", "plan.md"]);
+        assert_eq!((files[1].sha.as_deref(), files[1].deleted, files[1].seq), (Some(v1.0.as_str()), false, 8));
+        assert_eq!(f.db.file_history(&pk(&ann), "c", "plan.md", 100).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn files_of_a_private_channel_are_for_its_members() {
+        let mut f = fixture();
+        let owner = join(&mut f.db, Role::Owner, "Owner");
+        let ann = join(&mut f.db, Role::Member, "Ann");
+        let bob = join(&mut f.db, Role::Member, "Bob");
+        publish(&mut f.db, &ann, "conv.put", serde_json::json!({"conv": "p", "name": "P", "private": true})).unwrap();
+        publish(&mut f.db, &ann, "conv.add", serde_json::json!({"conv": "p", "member": pk(&bob)})).unwrap();
+        let file = uploaded(&mut f.db, &ann, "secret plan");
+        assert_eq!(put_file(&mut f.db, &ann, "p", "plan.md", &file).unwrap().seq, 3);
+
+        // The owner is not in it: every way in is answered as for a channel that does not
+        // exist, whether or not the hash or the path is known.
+        let other = uploaded(&mut f.db, &owner, "mine");
+        let o = pk(&owner);
+        for conv in ["p", "nowhere"] {
+            assert_eq!(code(put_file(&mut f.db, &owner, conv, "plan.md", &file)), "no_conv");
+            assert_eq!(code(put_file(&mut f.db, &owner, conv, "new.md", &other)), "no_conv");
+            assert_eq!(code(put_file(&mut f.db, &owner, conv, "new.md", &(sha256_hex(b"?"), 1))), "no_conv");
+            for path in ["plan.md", "new.md"] {
+                let body = serde_json::json!({"conv": conv, "path": path});
+                assert_eq!(code(publish(&mut f.db, &owner, "file.drop", body)), "no_conv");
+                assert_eq!(code(f.db.file_history(&o, conv, path, 100)), "no_conv");
+            }
+            assert_eq!(code(f.db.files(&o, conv, false)), "no_conv");
+            assert_eq!(code(f.db.files(&o, conv, true)), "no_conv");
+            assert_eq!(code(f.db.check_download(&o, conv, &file.0)), "no_conv");
+            assert_eq!(code(f.db.check_upload(&o, conv, &file.0, file.1, 100, NO_QUOTA)), "no_conv");
+            assert_eq!(code(f.db.check_upload(&o, conv, &other.0, 1_000, 100, NO_QUOTA)), "no_conv");
+            assert!(matches!(f.db.readers(&o, conv), Err(OpError::Refused { code: "no_conv", .. })));
+            assert!(!f.db.can_read(&o, conv).unwrap());
+        }
+        assert_eq!(f.db.head().unwrap(), 3);
+
+        // The event is the channel's: served to its members, live and in sync, and to nobody else.
+        match f.db.audience(3).unwrap() {
+            Audience::Only(members) => assert_eq!(members, HashSet::from([pk(&ann), pk(&bob)])),
+            Audience::Everyone => panic!("a private channel's file went to everyone"),
+        }
+        match f.db.readers(&pk(&bob), "p").unwrap() {
+            Audience::Only(members) => assert_eq!(members, HashSet::from([pk(&ann), pk(&bob)])),
+            Audience::Everyone => panic!("a private channel is read by everyone"),
+        }
+        assert_eq!(seqs(&f.db.sync_for(&pk(&bob), 0, None, 200, usize::MAX).unwrap()), vec![1, 2, 3]);
+        assert!(f.db.sync_for(&o, 0, None, 200, usize::MAX).unwrap().events.is_empty());
+        assert_eq!(f.db.head_for(&o).unwrap(), 0);
+
+        // Bob is taken out: nothing is deleted, and he is outside like anyone else.
+        publish(&mut f.db, &ann, "conv.remove", serde_json::json!({"conv": "p", "member": pk(&bob)})).unwrap();
+        assert_eq!(code(f.db.files(&pk(&bob), "p", false)), "no_conv");
+        assert_eq!(code(f.db.check_download(&pk(&bob), "p", &file.0)), "no_conv");
+        assert!(!f.db.can_read(&pk(&bob), "p").unwrap());
+        assert_eq!(paths(&f.db.files(&pk(&ann), "p", false).unwrap()), vec!["plan.md"]);
+        assert_eq!(f.db.blob_size(&file.0).unwrap(), Some(file.1));
+        // Nor when he leaves the team, whatever he uploaded.
+        let bobs = uploaded(&mut f.db, &bob, "from bob");
+        f.db.remove_member(&o, &pk(&bob)).unwrap();
+        assert_eq!(f.db.blob_size(&bobs.0).unwrap(), Some(bobs.1));
+        assert!(!f.db.can_read(&pk(&bob), "p").unwrap());
+        assert_eq!(f.db.file_history(&pk(&ann), "p", "plan.md", 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn uploads_are_limited_in_size_and_in_total() {
+        let mut f = fixture();
+        let ann = join(&mut f.db, Role::Owner, "Ann");
+        let a = pk(&ann);
+        publish(&mut f.db, &ann, "conv.put", serde_json::json!({"conv": "c", "name": "C"})).unwrap();
+        let sha = |text: &str| sha256_hex(text.as_bytes());
+        let (max, quota) = (100, 250);
+
+        assert_eq!(code(f.db.check_upload(&a, "c", &sha("big"), 101, max, quota)), "too_big");
+        assert!(!f.db.check_upload(&a, "c", &sha("a"), 100, max, quota).unwrap());
+        assert!(f.db.store_blob(&sha("a"), 100, &a, NOW, quota).unwrap());
+        assert!(f.db.store_blob(&sha("b"), 100, &a, NOW, quota).unwrap());
+        // 200 of 250 are taken: 50 more fit, 51 do not, at the ticket and at the upload.
+        assert!(!f.db.check_upload(&a, "c", &sha("c"), 50, max, quota).unwrap());
+        assert_eq!(code(f.db.check_upload(&a, "c", &sha("c"), 51, max, quota)), "quota");
+        assert_eq!(code(f.db.store_blob(&sha("c"), 51, &a, NOW, quota)), "quota");
+        assert_eq!(f.db.blob_size(&sha("c")).unwrap(), None);
+        // What is stored already is offered again without counting twice, even when full.
+        assert!(f.db.store_blob(&sha("c"), 50, &a, NOW, quota).unwrap());
+        assert!(f.db.check_upload(&a, "c", &sha("a"), 100, max, quota).unwrap());
+        assert!(!f.db.store_blob(&sha("a"), 100, &a, NOW, quota).unwrap());
+        assert_eq!(code(f.db.check_upload(&a, "c", &sha("d"), 1, max, quota)), "quota");
+        // A hash that is known with another size is not "have": the sizes must agree.
+        // (Its own row is not counted against it: it would take that row's place.)
+        assert!(!f.db.check_upload(&a, "c", &sha("a"), 99, max, quota).unwrap());
+
+        // Only a member's upload is recorded; one that no channel refers to can be taken back.
+        assert_eq!(code(f.db.store_blob(&sha("x"), 1, &pk(&generate_key()), NOW, NO_QUOTA)), "not_member");
+        put_file(&mut f.db, &ann, "c", "a.txt", &(sha("a"), 100)).unwrap();
+        f.db.forget_blob(&sha("a")).unwrap();
+        f.db.forget_blob(&sha("b")).unwrap();
+        assert_eq!(f.db.blob_size(&sha("a")).unwrap(), Some(100));
+        assert_eq!(f.db.blob_size(&sha("b")).unwrap(), None);
+    }
+
     // ---- migration -------------------------------------------------------------------
 
     /// The schema of version 1, as relays before per-channel access created it.
@@ -2418,6 +3369,10 @@ mod tests {
             assert_eq!(db.ws(), V1_WS);
             assert_eq!(user_version(&path), SCHEMA_VERSION);
             assert!(db.member_invites().unwrap());
+            // Every step ran: the tables of version 3 are there too.
+            for table in ["blobs", "files", "file_versions"] {
+                assert!(!columns(&path, table).is_empty(), "{table}");
+            }
 
             // Everything is still there, in order, for every member, and still verifies.
             for reader in [&ann, &bob] {
@@ -2468,6 +3423,106 @@ mod tests {
     }
 
     #[test]
+    fn a_version_2_database_gets_the_tables_for_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.db");
+        let (ann, bob) = (generate_key(), generate_key());
+        // A version 2 file as the relay before files left it: a private channel
+        // with its members, a public one, and a post in each.
+        let written: Vec<Event> = {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute("INSERT INTO workspace (ws, created_at) VALUES (?1, 1000)", params![V1_WS]).unwrap();
+            for (key, name, role) in [(&ann, "Ann", "owner"), (&bob, "Bob", "member")] {
+                conn.execute("INSERT INTO members VALUES (?1, ?2, ?3, ?4, 1000)", params![V1_WS, pk(key), name, role])
+                    .unwrap();
+            }
+            conn.execute("INSERT INTO convs VALUES (?1, 'general', ?2, 0, 0)", params![V1_WS, pk(&ann)]).unwrap();
+            conn.execute("INSERT INTO convs VALUES (?1, 'p', ?2, 0, 1)", params![V1_WS, pk(&ann)]).unwrap();
+            for conv in ["general", "p"] {
+                conn.execute("INSERT INTO conv_members VALUES (?1, ?2, ?3, ?3, 2000)", params![V1_WS, conv, pk(&ann)])
+                    .unwrap();
+            }
+            let events = vec![
+                sign_event(&ann, 2000, "conv.put", V1_WS, r#"{"conv":"general","name":"General"}"#),
+                sign_event(&ann, 2001, "conv.put", V1_WS, r#"{"conv":"p","name":"P","private":true}"#),
+                sign_event(&bob, 2002, "msg.post", V1_WS, r#"{"conv":"general","msg":{"id":"m1","text":"hello"}}"#),
+                sign_event(&ann, 2003, "msg.post", V1_WS, r#"{"conv":"p","msg":{"id":"m2","text":"secret"}}"#),
+            ];
+            for (i, event) in events.iter().enumerate() {
+                let conv = if i % 2 == 0 { "general" } else { "p" };
+                conn.execute(
+                    "INSERT INTO events (ws, seq, id, pubkey, created_at, kind, body, sig, conv)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![V1_WS, i as i64 + 1, event.id, event.pubkey, to_i64(event.created_at), event.kind, event.body, event.sig, conv],
+                )
+                .unwrap();
+            }
+            events
+        };
+        assert!(columns(&path, "files").is_empty());
+
+        let mut db = Db::open(&path, NOW).unwrap();
+        assert_eq!((db.ws(), user_version(&path)), (V1_WS, 3));
+        assert_eq!(
+            columns(&path, "files"),
+            ["ws", "conv", "path_key", "path", "sha", "size", "seq", "pubkey", "created_at", "by_agent", "by_color"]
+        );
+        assert_eq!(columns(&path, "file_versions"), columns(&path, "files"));
+        assert_eq!(columns(&path, "blobs"), ["ws", "sha", "size", "uploader", "created_at"]);
+
+        // What was there is as it was: the same events, served to the same people.
+        let page = db.sync_for(&pk(&ann), 0, None, 200, usize::MAX).unwrap();
+        assert_eq!(seqs(&page), vec![1, 2, 3, 4]);
+        for (served, original) in page.events.iter().zip(&written) {
+            assert_eq!(served.event.id, original.id);
+            assert_eq!(cube_proto::verify_event(&served.event), Ok(()));
+        }
+        assert_eq!(seqs(&db.sync_for(&pk(&bob), 0, None, 200, usize::MAX).unwrap()), vec![1, 3]);
+        assert!(db.conv_members(&pk(&ann), "p").unwrap().private);
+        assert!(db.files(&pk(&ann), "general", true).unwrap().is_empty());
+
+        // And files work in the channels that were there, under the rule that was there.
+        let file = uploaded(&mut db, &bob, "after the upgrade");
+        let event = |key: &SigningKey, conv: &str| {
+            let body = serde_json::json!({"conv": conv, "path": "notes.md", "sha": file.0, "size": file.1});
+            sign_event(key, NOW, "file.put", V1_WS, &body.to_string())
+        };
+        assert_eq!(db.publish(&event(&bob, "general"), NOW, 600).unwrap(), Published { seq: 5, fresh: true });
+        assert_eq!(code(db.publish(&event(&bob, "p"), NOW, 600)), "no_conv");
+        assert_eq!(db.publish(&event(&ann, "p"), NOW, 600).unwrap().seq, 6);
+        drop(db);
+
+        // Opening it again is not a second migration.
+        let db = Db::open(&path, NOW).unwrap();
+        assert_eq!(user_version(&path), 3);
+        assert_eq!(paths(&db.files(&pk(&bob), "general", false).unwrap()), vec!["notes.md"]);
+    }
+
+    #[test]
+    fn a_failed_step_leaves_a_version_2_database_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            // Something else already uses a name the migration needs.
+            conn.execute_batch("CREATE TABLE file_versions (x)").unwrap();
+        }
+        let error = match Db::open(&path, NOW) {
+            Ok(_) => panic!("the migration went through"),
+            Err(e) => e.to_string(),
+        };
+        assert!(error.contains("from schema version 2 to 3"), "{error}");
+        assert!(error.contains("left unchanged"), "{error}");
+        assert_eq!(user_version(&path), 2);
+        assert!(columns(&path, "blobs").is_empty() && columns(&path, "files").is_empty());
+        assert_eq!(columns(&path, "file_versions"), ["x"]);
+    }
+
+    #[test]
     fn a_version_1_row_that_names_no_channel_stops_the_migration() {
         for bad_body in ["not json", r#"{"msg":{"id":"m1","text":"hello"}}"#, r#"{"conv":7}"#, r#"["general"]"#] {
             let dir = tempfile::tempdir().unwrap();
@@ -2492,6 +3547,7 @@ mod tests {
             assert_eq!(columns(&path, "events"), before);
             assert!(!columns(&path, "convs").contains(&"private".to_string()));
             assert!(columns(&path, "conv_members").is_empty());
+            assert!(columns(&path, "files").is_empty());
             // And it fails the same way the next time.
             assert!(Db::open(&path, NOW).is_err());
         }
@@ -2507,6 +3563,6 @@ mod tests {
             Ok(_) => panic!("opened a database from a later version"),
             Err(e) => e.to_string(),
         };
-        assert!(error.contains("schema version 3"), "{error}");
+        assert!(error.contains("schema version 4"), "{error}");
     }
 }

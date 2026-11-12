@@ -19,6 +19,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod browser;
+mod drive;
 mod knowledge;
 mod picture;
 mod remote;
@@ -56,7 +57,7 @@ fn home() -> PathBuf {
 
 /// Everything Cube reads or writes lives under ~/CubeSpaces. Not ~/Cube: macOS file names are
 /// case-insensitive, so that could collide with a folder named `cube`.
-fn root() -> PathBuf {
+pub(crate) fn root() -> PathBuf {
     home().join("CubeSpaces")
 }
 
@@ -90,7 +91,7 @@ fn shell_path() -> &'static str {
 }
 
 /// Resolves a path and refuses anything outside ~/CubeSpaces.
-fn inside_root(p: &Path) -> Result<PathBuf, String> {
+pub(crate) fn inside_root(p: &Path) -> Result<PathBuf, String> {
     let real = p.canonicalize().map_err(|e| e.to_string())?;
     let base = root().canonicalize().map_err(|e| e.to_string())?;
     if real.starts_with(&base) {
@@ -342,7 +343,7 @@ fn parent_inside(base: &Path, rel: &Path) -> Result<PathBuf, String> {
 }
 
 /// Moves a file to the macOS Trash, so a delete can be taken back from the Finder.
-fn to_trash(file: &Path) -> Result<(), String> {
+pub(crate) fn to_trash(file: &Path) -> Result<(), String> {
     let name = file.file_name().ok_or("That is not a file path.")?.to_string_lossy().into_owned();
     let trash = home().join(".Trash");
     let mut dest = trash.join(&name);
@@ -1135,6 +1136,7 @@ pub fn run() {
         .manage(browser::Browser::default())
         .manage(remote::Remote::default())
         .manage(team::Team::default())
+        .manage(drive::Drive::default())
         .manage(slack::Slack::default())
         .invoke_handler(tauri::generate_handler![
             agent_start,
@@ -1197,6 +1199,13 @@ pub fn run() {
             team::team_leave,
             team::team_publish,
             team::team_ask,
+            team::team_request,
+            drive::drive_scan,
+            drive::drive_put,
+            drive::drive_drop,
+            drive::drive_get,
+            drive::drive_merge,
+            drive::drive_trash,
             remote::remote_card,
             remote::remote_secret_set,
             remote::remote_secret_has,

@@ -4,7 +4,7 @@ import { InviteLinkBox } from "@/components/People";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { useCube, type Conv } from "@/state/store";
-import { addToConv, askInvite, hasChannels, nameOf, refreshMembers, removeFromConv, shareConv } from "@/team";
+import { addToConv, askInvite, hasChannels, hasFiles, nameOf, refreshMembers, removeFromConv, setConvFiles, shareConv } from "@/team";
 
 const pill = "h-8 flex-none rounded-full bg-secondary px-3 text-[13px] font-semibold disabled:opacity-35";
 const primary = "h-8 flex-none rounded-full bg-primary px-3 text-[13px] font-semibold text-primary-foreground disabled:opacity-35";
@@ -61,11 +61,11 @@ export function ChannelPeople({ conv, open, onOpenChange }: { conv: Conv; open: 
           <div className="flex flex-col gap-2">
             <button type="button" className="flex items-start gap-3 rounded-xl border p-3 text-left hover:bg-accent disabled:opacity-40" disabled={busy || !live.connected} onClick={() => run(() => shareConv(conv.id, false))}>
               <PeopleIcon width={18} height={18} className="mt-0.5 flex-none" />
-              <span><span className="block font-semibold">Whole team</span><span className="block text-[13px] text-muted-foreground">Every member of the team sees it and can write in it.</span></span>
+              <span><span className="block font-semibold">Whole team</span><span className="block text-[13px] text-muted-foreground">Every member of the team sees it and can write in it.{hasFiles() ? " The files in its folder are shared with them too." : ""}</span></span>
             </button>
             <button type="button" className="flex items-start gap-3 rounded-xl border p-3 text-left hover:bg-accent disabled:opacity-40" disabled={busy || !live.connected || !channels} onClick={() => run(() => shareConv(conv.id, true))}>
               <LockIcon width={18} height={18} className="mt-0.5 flex-none" />
-              <span><span className="block font-semibold">Invited people only</span><span className="block text-[13px] text-muted-foreground">{channels ? "Only you and the people you add see it. This cannot be changed later." : "The team's relay is an earlier version that cannot do this yet."}</span></span>
+              <span><span className="block font-semibold">Invited people only</span><span className="block text-[13px] text-muted-foreground">{channels ? "Only you and the people you add see it. This cannot be changed later." : "The team's relay is an earlier version that cannot do this yet."}{channels && hasFiles() ? " The files in its folder are shared with them too." : ""}</span></span>
             </button>
             {!live.connected && <p className="text-[13px] text-muted-foreground">Not connected to the team right now.</p>}
           </div>
@@ -110,6 +110,20 @@ export function ChannelPeople({ conv, open, onOpenChange }: { conv: Conv; open: 
                     </li>
                   ))}
                 </ul>
+              </section>
+            )}
+
+            {hasFiles() && (
+              <section>
+                <h3 className="mb-1 text-[13px] font-semibold text-muted-foreground">Files</h3>
+                <div className="flex items-center gap-3">
+                  <p className="min-w-0 flex-1 text-[13px] text-muted-foreground">
+                    {shared.files
+                      ? "This channel's folder is shared: files added, changed or deleted here reach everyone in the channel, and every version is kept. Files that look like keys or passwords stay on this Mac."
+                      : "This channel's folder is only on this Mac. Share it and everyone in the channel works on the same files."}
+                  </p>
+                  <button type="button" className={shared.files ? pill : primary} onClick={() => setConvFiles(conv.id, !shared.files)}>{shared.files ? "Stop sharing files" : "Share the folder"}</button>
+                </div>
               </section>
             )}
 

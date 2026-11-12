@@ -5,6 +5,7 @@ import type { RemoteAgent } from "../agents/remote/a2a";
 import { ownColor, toDef, type SharedAgent, type SubAgent } from "../agents/subagents";
 import type { HeadlessEngine } from "../agents/headless";
 import type { JobKind, JobRun } from "../knowledge/jobs";
+import type { Remote } from "../team/drive";
 import type { TeamMember } from "../team/events";
 import type { Decision, Note, PlanStep } from "../agents/notes";
 import type { Question } from "../agents/permissions";
@@ -35,8 +36,32 @@ export interface Conv {
    * `open` lets teammates call this person's cubes here by naming them, and lets the Router
    * decide whether a teammate's message wants an answer.
    */
-  shared?: { id: string; since: number; open?: boolean; /** Only the people invited into it see it. Set when the channel is shared and never changed. */ private?: boolean };
+  shared?: {
+    id: string;
+    since: number;
+    open?: boolean;
+    /** Only the people invited into it see it. Set when the channel is shared and never changed. */
+    private?: boolean;
+    /** Whether this conversation's folder is the channel's shared folder. Unset for a channel shared before folders could be: the person is asked once. */
+    files?: boolean;
+  };
 }
+
+/** How a shared folder stands on this computer right now. */
+export interface DriveLive {
+  /** Instruction files a teammate changed, waiting for this person's yes. */
+  held: { key: string; rel: string; remote: Remote }[];
+  /** Files that stay on this computer, and why. */
+  skipped: { rel: string; why: string }[];
+  /** Files on their way up or down, or waiting to be left alone before they go. */
+  moving: number;
+  /** Files someone else is working on right now: path key → who, and until when that is believed. */
+  touched: Record<string, { pubkey: string; by?: Remote["by"]; until: number }>;
+  /** Things the person should know happened: two versions kept side by side, a file the relay would not take. */
+  notes: { id: string; text: string; rel?: string }[];
+}
+
+export const NO_DRIVE: DriveLive = { held: [], skipped: [], moving: 0, touched: {}, notes: [] };
 
 export interface Act {
   kind: ActKind;
@@ -353,6 +378,12 @@ interface CubeState {
     /** Who is in each shared channel, by shared id, as the relay last said. */
     convMembers?: Record<string, string[]>;
   };
+  /** Each shared channel's folder as the relay describes it, by shared id: path key → the file's latest version. Not kept: it is asked for again on connecting. */
+  drive: Record<string, Record<string, Remote>>;
+  /** What each file here was when it last agreed with the relay, by conversation: path key → hash. Kept, so that after a restart a change made here can be told from one made there. */
+  driveBase: Record<string, Record<string, string>>;
+  /** How each shared folder stands right now, by conversation. Not kept. */
+  driveLive: Record<string, DriveLive>;
   /** The connection to Slack right now. Not kept across restarts. */
   slackLive: { configured: boolean; connected: boolean; team: string; problem: string; /** Permissions the Slack app lacks for what Cube does there. */ missing?: string[] };
   /** How Cube keeps its memory, skills and wiki, and what the background jobs have done. */
@@ -427,6 +458,10 @@ interface CubeState {
   removeSubagent(id: string): void;
   setTeam(patch: Partial<CubeState["team"]>): void;
   setTeamLive(patch: Partial<CubeState["teamLive"]>): void;
+  setDrive(sharedId: string, view: Record<string, Remote> | undefined): void;
+  /** Remembers the version a file here agrees with the relay on; without a hash, forgets it. */
+  setDriveBase(convId: string, key: string, sha: string | undefined): void;
+  setDriveLive(convId: string, patch: Partial<DriveLive>): void;
   setConvShared(convId: string, shared: Conv["shared"]): void;
   /** Says a conversation is, or is no longer, a direct one with a teammate. */
   setConvPerson(convId: string, person: Conv["person"]): void;
@@ -541,6 +576,9 @@ export const useCube = create<CubeState>()(
       subagents: [],
       team: { members: [], head: 0 },
       teamLive: { connected: false, problem: "" },
+      drive: {},
+      driveBase: {},
+      driveLive: {},
       slackLive: { configured: false, connected: false, team: "", problem: "" },
       knowledge: { engine: "", model: "", auto: true, last: {}, cursor: { memory: 0, skills: 0 }, memoryChangedAt: 0, imported: false, runs: [] },
       knowledgeBusy: undefined,
@@ -620,6 +658,23 @@ export const useCube = create<CubeState>()(
         }),
       setTeam: (patch) => set((s) => ({ team: { ...s.team, ...patch } })),
       setTeamLive: (patch) => set((s) => ({ teamLive: { ...s.teamLive, ...patch } })),
+      setDrive: (sharedId, view) =>
+        set((s) => {
+          const drive = { ...s.drive };
+          if (view) drive[sharedId] = view;
+          else delete drive[sharedId];
+          return { drive };
+        }),
+      setDriveBase: (convId, key, sha) =>
+        set((s) => {
+          const had = s.driveBase[convId] ?? {};
+          if (had[key] === sha) return s;
+          const next = { ...had };
+          if (sha) next[key] = sha;
+          else delete next[key];
+          return { driveBase: { ...s.driveBase, [convId]: next } };
+        }),
+      setDriveLive: (convId, patch) => set((s) => ({ driveLive: { ...s.driveLive, [convId]: { ...(s.driveLive[convId] ?? NO_DRIVE), ...patch } } })),
       setConvShared: (convId, shared) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, shared } : c)) })),
       setConvPerson: (convId, person) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, person } : c)) })),
       renameConv: (convId, name) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, name } : c)) })),
@@ -709,6 +764,8 @@ export const useCube = create<CubeState>()(
             convs: s.convs.filter((c) => c.id !== id),
             messages: s.messages.filter((m) => m.convId !== id),
             unread: without(s.unread),
+            driveBase: without(s.driveBase),
+            driveLive: without(s.driveLive),
             files: without(s.files),
             tabs: without(s.tabs),
             selected: without(s.selected),
@@ -854,6 +911,7 @@ export const useCube = create<CubeState>()(
         messages: s.messages,
         sessions: s.sessions,
         authors: s.authors,
+        driveBase: s.driveBase,
         unread: s.unread,
       }),
       merge: (saved, current) => {

@@ -5,7 +5,9 @@ import { rescan } from "@/agents/orchestrator";
 import { inTauri, pageUrl, quickLook, readText, windowShot, windowsList, type Win } from "@/agents/runner";
 import { agentById } from "@/agents/types";
 import { CloseIcon, GlobeIcon, OpenIcon, PanelIcon, StageIcon, TermIcon } from "@/components/icons";
+import { Face } from "@/components/bits";
 import { FileTree } from "@/components/stage/FileTree";
+import { FileHistory, FolderNotices, useFolder } from "@/components/stage/SharedFolder";
 import { GitBar } from "@/components/stage/GitBar";
 import { EDIT_LIMIT, saveText } from "@/components/stage/save";
 import { Glyph } from "@/components/Glyph";
@@ -297,6 +299,10 @@ export function Stage() {
   const lastShot = shots[shots.length - 1] as Shot | undefined;
   const author = onBrowser ? undefined : onScreen ? (lastShot ? agentById(lastShot.by) : undefined) : current?.by ? agentById(current.by) : undefined;
   const changes = useMemo(() => changesSince(artifacts, baseline), [artifacts, baseline]);
+  // In a shared folder, whose version the file in view is.
+  const folder = useFolder(conv);
+  const about = current ? folder.about(current.rel) : undefined;
+  const theirs = Boolean(about?.synced && about.other);
 
   // While the Stage is open, keep looking at the folder: files also change outside of agent runs
   // (the person's own editor, a script). Looking is cheap, and it stops when the window is hidden.
@@ -396,17 +402,18 @@ export function Stage() {
         {hasTree && (
           <>
             <aside className="flex-none overflow-hidden rounded-[18px] border" style={{ width: treeW }}>
-              <FileTree convId={conv.id} dir={conv.dir} current={current?.rel} />
+              <FileTree conv={conv} current={current?.rel} />
             </aside>
             <Resizer label="File list width" value={treeW} min={150} max={420} reset={200} onChange={(w) => setSetting("treeW", w)} className="w-3" />
           </>
         )}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+        <FolderNotices conv={conv} count={artifacts.length} />
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[18px] border">
           {/* About the file in view, and what can be done with it. */}
           {(current || onScreen) && (
             <div className="flex h-10 flex-none items-center gap-2 border-b pl-3 pr-1.5 text-[13px]">
-              {author && <CubeStill color={author.color} size={18} />}
+              {theirs && about ? <Face pubkey={about.remote.pubkey} name={about.label} size={18} /> : author && <CubeStill color={author.color} size={18} />}
               <p className="min-w-0 flex-1 truncate text-muted-foreground" title={current ? current.rel : undefined}>
                 {onScreen ? (
                   <>
@@ -417,7 +424,8 @@ export function Stage() {
                 ) : current ? (
                   <>
                     {KIND_LABEL[current.kind]}
-                    {author && <> · by {author.name}</>}
+                    {about?.synced ? <> · <span data-notranslate>{about.label}</span></> : author && <> · by {author.name}</>}
+                    {about?.touching && <> · <span data-notranslate>{about.touching}</span> <span>is working on this</span></>}
                     {change && <> · <span title={change === "added" ? "New since you last spoke" : "Changed since you last spoke"}>{change === "added" ? "new" : "changed"}</span></>}
                     {busy && <> · live</>}
                   </>
@@ -432,6 +440,7 @@ export function Stage() {
                   ))}
                 </div>
               )}
+              {current && <FileHistory conv={conv} rel={current.rel} about={about} />}
               {current && inTauri && (
                 <button type="button" className="flex h-7 flex-none items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground" title="Open in its own app" onClick={() => void openPath(current.path)}>
                   <OpenIcon width={13} height={13} /> Open

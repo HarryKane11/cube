@@ -8,7 +8,8 @@ import { ChevronIcon, PencilIcon, PlusIcon, TrashIcon } from "@/components/icons
 import { isEditable, kindOf } from "@/lib/files";
 import { buildTree, changesSince, searchFiles, type Change, type Found, type TreeNode } from "@/lib/tree";
 import { cn } from "@/lib/utils";
-import { useCube, type Artifact } from "@/state/store";
+import { useCube, type Artifact, type Conv } from "@/state/store";
+import { FolderFoot, FolderMark, useFolder, type About } from "./SharedFolder";
 
 const NONE: Artifact[] = [];
 const BADGE: Record<Change, { letter: string; label: string; tone: string }> = {
@@ -46,6 +47,8 @@ interface Ops {
   setBusy: (b: Ops["busy"]) => void;
   rename: (from: string, to: string | null) => void;
   trash: (rel: string) => void;
+  /** In a shared folder: whose version a file is, and whether a teammate is working on it. */
+  about: (rel: string) => About | undefined;
 }
 
 function Row({ node, depth, ops }: { node: TreeNode; depth: number; ops: Ops }) {
@@ -102,6 +105,7 @@ function Row({ node, depth, ops }: { node: TreeNode; depth: number; ops: Ops }) 
           <button type="button" className={act} aria-label={`Move ${node.rel} to the Trash`} title="Move to Trash" onClick={() => ops.setBusy({ rel: node.rel, what: "trash" })}><TrashIcon width={12} height={12} /></button>
         </>
       )}
+      <FolderMark about={ops.about(node.rel)} />
       <Badge change={ops.changes[node.rel]} />
     </li>
   );
@@ -140,7 +144,9 @@ function SearchResults({ hits, open }: { hits: Found[]; open: (hit: Found) => vo
 }
 
 /** The conversation's files: as a tree to browse and tidy, the short list of what changed, and a search across all of them. */
-export function FileTree({ convId, dir, current }: { convId: string; dir: string; current?: string }) {
+export function FileTree({ conv, current }: { conv: Conv; current?: string }) {
+  const { id: convId, dir } = conv;
+  const folder = useFolder(conv);
   const files = useCube((s) => s.files[convId] ?? NONE);
   const baseline = useCube((s) => s.baseline[convId]);
   const dirty = useCube((s) => s.dirty);
@@ -237,7 +243,7 @@ export function FileTree({ convId, dir, current }: { convId: string; dir: string
     }
   };
 
-  const ops: Ops = { shut: q ? new Set() : shut, toggle, byRel, changes, current, pick: (rel) => select(convId, rel, true), busy, setBusy, rename: (f, t) => void rename(f, t), trash: (r) => void trash(r) };
+  const ops: Ops = { shut: q ? new Set() : shut, toggle, byRel, changes, current, pick: (rel) => select(convId, rel, true), busy, setBusy, rename: (f, t) => void rename(f, t), trash: (r) => void trash(r), about: folder.about };
   const chip = "h-6 rounded-full bg-secondary px-2 text-xs font-medium text-muted-foreground hover:text-foreground";
   const note = "px-2 py-1 text-[13px] text-muted-foreground";
 
@@ -319,6 +325,7 @@ export function FileTree({ convId, dir, current }: { convId: string; dir: string
             </>
           ))}
       </div>
+      <FolderFoot conv={conv} />
       {error && <p className="flex-none border-t px-2.5 py-1.5 text-xs text-destructive" role="alert">{error}</p>}
     </nav>
   );

@@ -9,6 +9,7 @@ use cube_proto::{
     auth_message, claim_message, event_id, generate_key, parse_invite_link, pubkey_hex, sign_event,
     sign_text, verify_event, Event, SigningKey,
 };
+use cube_relay::db::sha256_hex;
 use cube_relay::{Config, Limits};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -131,6 +132,54 @@ async fn http_get(host: &str, path: &str, headers: &[(&str, &str)]) -> (String, 
     .unwrap()
 }
 
+/// One HTTP/1.1 request that may carry a body: status code, lower-cased
+/// headers, body bytes. `Content-Length` is added unless `headers` already
+/// says how the body is framed.
+async fn http_send(host: &str, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> (u16, String, Vec<u8>) {
+    let framed = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length") || name.eq_ignore_ascii_case("transfer-encoding"));
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if !framed && method != "GET" {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+    let mut bytes = request.into_bytes();
+    bytes.extend_from_slice(body);
+    let host = host.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut stream = std::net::TcpStream::connect(&host).unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        stream.write_all(&bytes).unwrap();
+        let mut response = Vec::new();
+        // A relay that refuses without reading the body may close before the read ends.
+        let _ = stream.read_to_end(&mut response);
+        let split = response.windows(4).position(|w| w == b"\r\n\r\n").expect("no response head");
+        let head = String::from_utf8_lossy(&response[..split]).to_string();
+        let (status, headers) = head.split_once("\r\n").unwrap_or((&head, ""));
+        let code = status.split(' ').nth(1).and_then(|code| code.parse().ok()).expect("no status code");
+        (code, headers.to_lowercase(), response[split + 4..].to_vec())
+    })
+    .await
+    .unwrap()
+}
+
+/// `PUT /blob/<sha>` with a ticket.
+async fn blob_put(relay: &TestRelay, sha: &str, ticket: &str, body: &[u8]) -> u16 {
+    let bearer = format!("Bearer {ticket}");
+    http_send(&relay.host, "PUT", &format!("/blob/{sha}"), &[("Authorization", &bearer)], body).await.0
+}
+
+/// `GET /blob/<sha>` with a ticket: the status and the body.
+async fn blob_get(relay: &TestRelay, sha: &str, ticket: &str) -> (u16, Vec<u8>) {
+    let bearer = format!("Bearer {ticket}");
+    let (status, _, body) = http_send(&relay.host, "GET", &format!("/blob/{sha}"), &[("Authorization", &bearer)], &[]).await;
+    (status, body)
+}
+
 // ---- a client ------------------------------------------------------------------------
 
 async fn send(sock: &mut Sock, value: Value) {
@@ -223,7 +272,7 @@ struct Peer {
     key: SigningKey,
     ws: String,
     ready: Value,
-    /// `event`, `members` and `settings` frames that arrived while waiting for a reply.
+    /// `event`, `members`, `settings` and `file.touch` frames that arrived while waiting for a reply.
     inbox: VecDeque<Value>,
 }
 
@@ -242,7 +291,7 @@ impl Peer {
         loop {
             let frame = recv(&mut self.sock).await.expect("connection closed while waiting for a reply");
             match t(&frame) {
-                "event" | "members" | "settings" => self.inbox.push_back(frame),
+                "event" | "members" | "settings" | "file.touch" => self.inbox.push_back(frame),
                 _ => return frame,
             }
         }
@@ -367,6 +416,65 @@ impl Peer {
             if seq == until {
                 return seen;
             }
+        }
+    }
+
+    /// Asks for a ticket under the id `t1`; every answer must repeat it.
+    async fn ticket(&mut self, op: &str, conv: &str, sha: &str, size: Option<u64>) -> Value {
+        let mut request = json!({"t": "blob.ticket", "id": "t1", "op": op, "conv": conv, "sha": sha});
+        if let Some(size) = size {
+            request["size"] = json!(size);
+        }
+        let reply = self.ask(request).await;
+        assert_eq!(reply["id"], json!("t1"), "{reply}");
+        reply
+    }
+
+    /// A ticket that was granted, as the string to present.
+    async fn granted(&mut self, op: &str, conv: &str, sha: &str, size: Option<u64>) -> String {
+        let reply = self.ticket(op, conv, sha, size).await;
+        assert_eq!(t(&reply), "blob.ticket", "{reply}");
+        reply["ticket"].as_str().unwrap_or_else(|| panic!("no ticket in {reply}")).to_string()
+    }
+
+    /// Sends `content` to the relay unless it has it; returns the hash and size.
+    async fn upload(&mut self, relay: &TestRelay, conv: &str, content: &[u8]) -> (String, u64) {
+        let (sha, size) = (sha256_hex(content), content.len() as u64);
+        let reply = self.ticket("put", conv, &sha, Some(size)).await;
+        assert_eq!(t(&reply), "blob.ticket", "{reply}");
+        if reply["have"] != json!(true) {
+            assert_eq!(blob_put(relay, &sha, reply["ticket"].as_str().unwrap(), content).await, 201);
+        }
+        (sha, size)
+    }
+
+    /// Uploads `content` and makes it the file at `path`; returns the hash and the seq.
+    async fn put_file(&mut self, relay: &TestRelay, conv: &str, path: &str, content: &[u8]) -> (String, u64) {
+        let (sha, size) = self.upload(relay, conv, content).await;
+        let seq = self.must("file.put", json!({"conv": conv, "path": path, "sha": sha, "size": size})).await;
+        (sha, seq)
+    }
+
+    /// Fetches a version of a file with a fresh ticket.
+    async fn download(&mut self, relay: &TestRelay, conv: &str, sha: &str) -> Vec<u8> {
+        let ticket = self.granted("get", conv, sha, None).await;
+        let (status, body) = blob_get(relay, sha, &ticket).await;
+        assert_eq!(status, 200);
+        body
+    }
+
+    /// The live frames that came before the event with seq `until`, by type.
+    async fn kinds_until(&mut self, until: u64) -> Vec<String> {
+        let mut kinds = Vec::new();
+        loop {
+            let frame = match self.inbox.pop_front() {
+                Some(frame) => frame,
+                None => recv(&mut self.sock).await.expect("connection closed while waiting for an event"),
+            };
+            if t(&frame) == "event" && frame["seq"] == json!(until) {
+                return kinds;
+            }
+            kinds.push(t(&frame).to_string());
         }
     }
 
@@ -1324,7 +1432,7 @@ async fn roles_and_names() {
 async fn ready_names_features_and_settings() {
     let relay = TestRelay::start().await;
     let owner = relay.owner("Ann").await;
-    assert_eq!(owner.ready["features"], json!(["channels", "join-page", "profiles"]));
+    assert_eq!(owner.ready["features"], json!(["channels", "join-page", "profiles", "files"]));
     assert_eq!(owner.ready["settings"], json!({"member_invites": true}));
 }
 
@@ -1653,6 +1761,672 @@ async fn sync_is_rate_limited_per_connection() {
     assert_eq!(error_code(&reply), "bad_request");
 }
 
+// ---- files ---------------------------------------------------------------------------
+
+/// The frame every request about a channel the caller cannot read is answered with.
+fn no_conv(id: Option<&str>) -> Value {
+    let mut frame = json!({"t": "error", "code": "no_conv", "message": "the channel does not exist"});
+    if let Some(id) = id {
+        frame["id"] = json!(id);
+    }
+    frame
+}
+
+/// Bytes that are not text and do not fit in one read.
+fn binary(len: usize, salt: usize) -> Vec<u8> {
+    (0..len).map(|i| ((i * 31 + salt * 7) % 251) as u8).collect()
+}
+
+fn stored_blobs(relay: &TestRelay) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(relay.cfg.blob_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_goes_up_is_announced_and_comes_down() {
+    let relay = TestRelay::start().await;
+    let mut ann = relay.owner("Ann").await;
+    let mut bea = relay.join(&mut ann, "member", "Bea").await;
+    ann.must("conv.put", json!({"conv": "c", "name": "C"})).await;
+    // Larger than anything that travels in a frame, and than what is read in one piece.
+    let content = binary(3_000_000, 1);
+    let (sha, size) = (sha256_hex(&content), content.len() as u64);
+
+    // The folder for files sits next to the database, for the relay's user only.
+    assert_eq!(relay.cfg.blob_dir(), relay.cfg.db_path.parent().unwrap().join("blobs"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(relay.cfg.blob_dir()).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+
+    // A ticket: random, safe in a header, good for a minute.
+    let reply = ann.ticket("put", "c", &sha, Some(size)).await;
+    let ticket = reply["ticket"].as_str().unwrap().to_string();
+    let expires = reply["expires"].as_u64().unwrap();
+    assert_eq!(reply, json!({"t": "blob.ticket", "id": "t1", "op": "put", "sha": sha, "ticket": ticket, "expires": expires}));
+    assert!(ticket.len() >= 43 && ticket.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "{ticket}");
+    assert!(expires > now() + 50 && expires <= now() + 61, "{expires}");
+
+    // The bytes go up over HTTP. The file is not in the channel until an event says so.
+    let bearer = format!("Bearer {ticket}");
+    let path = format!("/blob/{sha}");
+    let headers = [("Authorization", bearer.as_str()), ("Origin", "https://evil.example")];
+    let (status, headers, _) = http_send(&relay.host, "PUT", &path, &headers, &content).await;
+    assert_eq!(status, 201);
+    assert!(headers.contains("x-content-type-options: nosniff") && headers.contains("cache-control: no-store"), "{headers}");
+    assert!(!headers.contains("access-control"), "{headers}");
+    assert_eq!(stored_blobs(&relay), vec![sha.clone()]);
+    let on_disk = relay.cfg.blob_dir().join(&sha);
+    assert_eq!(std::fs::read(&on_disk).unwrap(), content);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&on_disk).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    assert_eq!(bea.ask(json!({"t": "files.list", "conv": "c"})).await, json!({"t": "files", "conv": "c", "files": []}));
+    // Not in a channel, not to be had: a hash alone opens nothing.
+    assert_eq!(error_code(&bea.ticket("get", "c", &sha, None).await), "not_found");
+
+    // The relay has it now, so nobody needs to send it again.
+    for peer in [&mut ann, &mut bea] {
+        let reply = peer.ticket("put", "c", &sha, Some(size)).await;
+        assert_eq!(reply, json!({"t": "blob.ticket", "id": "t1", "op": "put", "sha": sha, "have": true}));
+    }
+
+    // The event puts it at a path. It reaches the others live and in sync, and still verifies.
+    let body = json!({"conv": "c", "path": "docs/Plan.md", "sha": sha, "size": size, "by": {"agent": "Builder", "color": "#1FA864"}});
+    let event = ann.sign("file.put", body);
+    let reply = ann.send_event(&event).await;
+    assert_eq!(reply, json!({"t": "ok", "id": event.id, "seq": 2}));
+    let live = bea.live_until(2).await;
+    let got: Event = serde_json::from_value(live.last().unwrap().clone()).unwrap();
+    assert_eq!((got.kind.as_str(), got.body.as_str()), ("file.put", event.body.as_str()));
+    assert_eq!(verify_event(&got), Ok(()));
+    let (events, _) = bea.sync_all(0, Some("c")).await;
+    assert_eq!(seqs(&events), vec![1, 2]);
+    assert_eq!(events[1]["kind"], json!("file.put"));
+
+    // The listing, with and without an id.
+    let entry = json!({
+        "path": "docs/Plan.md", "sha": sha, "size": size, "seq": 2, "pubkey": ann.pk(),
+        "created_at": event.created_at, "by": {"agent": "Builder", "color": "#1FA864"},
+    });
+    let listed = bea.ask(json!({"t": "files.list", "id": "list-7", "conv": "c"})).await;
+    assert_eq!(listed, json!({"t": "files", "id": "list-7", "conv": "c", "files": [entry]}));
+    let listed = bea.ask(json!({"t": "files.list", "conv": "c", "deleted": true})).await;
+    assert_eq!(listed, json!({"t": "files", "conv": "c", "files": [entry]}));
+
+    // Bea fetches it: the bytes, as data and nothing else, not for another site to read.
+    let ticket = bea.granted("get", "c", &sha, None).await;
+    let bearer = format!("Bearer {ticket}");
+    let headers = [("Authorization", bearer.as_str()), ("Origin", "https://evil.example")];
+    let (status, headers, body) = http_send(&relay.host, "GET", &path, &headers, &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, content);
+    assert!(headers.contains("content-type: application/octet-stream"), "{headers}");
+    assert!(headers.contains(&format!("content-length: {size}")), "{headers}");
+    assert!(headers.contains("x-content-type-options: nosniff") && headers.contains("cache-control: no-store"), "{headers}");
+    assert!(!headers.contains("access-control"), "{headers}");
+    // The ticket was for that one request.
+    assert_eq!(blob_get(&relay, &sha, &ticket).await.0, 401);
+
+    // A browser's preflight is told nothing either.
+    let preflight = [("Origin", "https://evil.example"), ("Access-Control-Request-Method", "PUT")];
+    let (status, headers, _) = http_send(&relay.host, "OPTIONS", &path, &preflight, &[]).await;
+    assert_eq!(status, 405);
+    assert!(!headers.contains("access-control"), "{headers}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_must_be_what_its_ticket_was_issued_for() {
+    let relay = TestRelay::start().await;
+    let mut ann = relay.owner("Ann").await;
+    ann.must("conv.put", json!({"conv": "c", "name": "C"})).await;
+    let content = b"the real content".to_vec();
+    let other = b"something else!!".to_vec();
+    assert_eq!(content.len(), other.len());
+    let (sha, size) = (sha256_hex(&content), content.len() as u64);
+    let other_sha = sha256_hex(&other);
+    let path = format!("/blob/{sha}");
+
+    // No ticket, a made-up one, or one in the address instead of the header.
+    let (status, headers, _) = http_send(&relay.host, "PUT", &path, &[], &content).await;
+    assert_eq!(status, 401);
+    assert!(headers.contains("x-content-type-options: nosniff") && !headers.contains("access-control"), "{headers}");
+    assert_eq!(blob_put(&relay, &sha, "bm90LWEtdGlja2V0LW5vdC1hLXRpY2tldC1ub3QtYS10aWNrZXQ", &content).await, 401);
+    assert_eq!(http_send(&relay.host, "GET", &path, &[], &[]).await.0, 401);
+    let ticket = ann.granted("put", "c", &sha, Some(size)).await;
+    for query in [format!("{path}?ticket={ticket}"), format!("{path}?access_token={ticket}"), format!("{path}?{ticket}")] {
+        assert_eq!(http_send(&relay.host, "PUT", &query, &[], &content).await.0, 401);
+    }
+    for header in ["X-Ticket", "Cookie"] {
+        assert_eq!(http_send(&relay.host, "PUT", &path, &[(header, &ticket)], &content).await.0, 401);
+    }
+    // None of that used the ticket up, and without a length nothing is taken either.
+    let bearer = format!("Bearer {ticket}");
+    let chunked = format!("{:x}\r\n{}\r\n0\r\n\r\n", content.len(), String::from_utf8_lossy(&content));
+    let headers = [("Authorization", bearer.as_str()), ("Transfer-Encoding", "chunked")];
+    assert_eq!(http_send(&relay.host, "PUT", &path, &headers, chunked.as_bytes()).await.0, 411);
+
+    // The wrong bytes: refused, and the ticket is spent.
+    assert_eq!(blob_put(&relay, &sha, &ticket, &other).await, 422);
+    assert_eq!(blob_put(&relay, &sha, &ticket, &content).await, 401);
+    assert!(stored_blobs(&relay).is_empty());
+
+    // A length that is not the ticket's, shorter or longer.
+    for wrong in [&content[..content.len() - 1], &[content.as_slice(), b"!"].concat()[..]] {
+        let ticket = ann.granted("put", "c", &sha, Some(size)).await;
+        assert_eq!(blob_put(&relay, &sha, &ticket, wrong).await, 413);
+        assert_eq!(blob_put(&relay, &sha, &ticket, &content).await, 401);
+    }
+    // A length that is claimed but not delivered: the connection ends, nothing
+    // is kept of what came, and the ticket is spent.
+    let ticket = ann.granted("put", "c", &sha, Some(size)).await;
+    let request = format!("PUT {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {ticket}\r\nContent-Length: {size}\r\n\r\nthe ", relay.host);
+    let host = relay.host.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut stream = std::net::TcpStream::connect(&host).unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        assert!(!response.starts_with(b"HTTP/1.1 2"), "{}", String::from_utf8_lossy(&response));
+    })
+    .await
+    .unwrap();
+    let deadline = Instant::now() + WAIT;
+    while !stored_blobs(&relay).is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(stored_blobs(&relay).is_empty());
+    assert_eq!(blob_put(&relay, &sha, &ticket, &content).await, 401);
+
+    // A ticket for another hash, presented here.
+    let ticket = ann.granted("put", "c", &other_sha, Some(size)).await;
+    assert_eq!(blob_put(&relay, &sha, &ticket, &content).await, 401);
+    assert_eq!(blob_put(&relay, &other_sha, &ticket, &other).await, 401);
+    // A ticket for the other direction.
+    let ticket = ann.granted("put", "c", &sha, Some(size)).await;
+    assert_eq!(blob_get(&relay, &sha, &ticket).await.0, 401);
+    assert_eq!(blob_put(&relay, &sha, &ticket, &content).await, 401);
+    assert!(stored_blobs(&relay).is_empty());
+
+    // Done right it is stored, once.
+    let ticket = ann.granted("put", "c", &sha, Some(size)).await;
+    assert_eq!(blob_put(&relay, &sha, &ticket, &content).await, 201);
+    assert_eq!(blob_put(&relay, &sha, &ticket, &content).await, 401);
+    assert_eq!(stored_blobs(&relay), vec![sha.clone()]);
+    ann.must("file.put", json!({"conv": "c", "path": "a.txt", "sha": sha, "size": size})).await;
+    let ticket = ann.granted("get", "c", &sha, None).await;
+    assert_eq!(blob_put(&relay, &sha, &ticket, &content).await, 401);
+    assert_eq!(blob_get(&relay, &sha, &ticket).await.0, 401);
+    // An event cannot claim another size for a hash, or a hash that was never sent.
+    let reply = ann.publish("file.put", json!({"conv": "c", "path": "b.txt", "sha": sha, "size": size + 1})).await;
+    assert_eq!(error_code(&reply), "not_found");
+    let reply = ann.publish("file.put", json!({"conv": "c", "path": "b.txt", "sha": other_sha, "size": size})).await;
+    assert_eq!(error_code(&reply), "not_found");
+
+    // A request for a ticket that makes no sense is refused under its id.
+    for request in [
+        json!({"t": "blob.ticket", "id": "x9", "op": "delete", "conv": "c", "sha": sha}),
+        json!({"t": "blob.ticket", "id": "x9", "op": "put", "conv": "c", "sha": sha}),
+        json!({"t": "blob.ticket", "id": "x9", "op": "put", "conv": "c", "sha": sha.to_uppercase(), "size": size}),
+        json!({"t": "blob.ticket", "id": "x9", "op": "get", "conv": "c", "sha": "../../etc/passwd"}),
+        json!({"t": "blob.ticket", "id": "x9", "op": "get", "conv": "", "sha": sha}),
+        json!({"t": "blob.ticket", "id": "x9", "op": "put", "conv": "c", "sha": sha, "size": "16"}),
+        json!({"t": "blob.ticket", "id": "x9", "op": "put", "conv": "c", "sha": sha, "size": -1}),
+        json!({"t": "blob.ticket", "id": "x9", "op": "put", "conv": "c"}),
+        json!({"t": "files.list", "id": "x9"}),
+        json!({"t": "files.history", "id": "x9", "conv": "c"}),
+    ] {
+        let reply = ann.ask(request.clone()).await;
+        assert_eq!((error_code(&reply), &reply["id"]), ("bad_request", &json!("x9")), "{request}");
+    }
+    // An id that is not a short string is not repeated.
+    let reply = ann.ask(json!({"t": "files.list", "id": "x".repeat(129), "conv": "c"})).await;
+    assert_eq!(reply, json!({"t": "error", "code": "bad_request", "message": "id must be a short string"}));
+    let reply = ann.ask(json!({"t": "files.list", "id": 7, "conv": "c"})).await;
+    assert_eq!((error_code(&reply), reply.get("id")), ("bad_request", None));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ticket_expires() {
+    let relay = TestRelay::start_with(|cfg| cfg.limits.blob_ticket_ttl = Duration::from_millis(300)).await;
+    let mut ann = relay.owner("Ann").await;
+    ann.must("conv.put", json!({"conv": "c", "name": "C"})).await;
+    let (sha, _) = ann.put_file(&relay, "c", "a.txt", b"first").await;
+    let late = b"too late".to_vec();
+    let late_sha = sha256_hex(&late);
+
+    let put = ann.granted("put", "c", &late_sha, Some(late.len() as u64)).await;
+    let get = ann.granted("get", "c", &sha, None).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(blob_put(&relay, &late_sha, &put, &late).await, 401);
+    assert_eq!(blob_get(&relay, &sha, &get).await.0, 401);
+    assert_eq!(stored_blobs(&relay), vec![sha.clone()]);
+    // A new one, used at once, works.
+    assert_eq!(ann.download(&relay, "c", &sha).await, b"first");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_has_a_time_limit_and_only_so_many_run_at_once() {
+    let relay = TestRelay::start_with(|cfg| {
+        cfg.limits.blob_uploads_max = 1;
+        cfg.limits.blob_upload_timeout = Duration::from_secs(1);
+    })
+    .await;
+    let mut ann = relay.owner("Ann").await;
+    ann.must("conv.put", json!({"conv": "c", "name": "C"})).await;
+    let (slow, quick) = (b"this one never finishes".to_vec(), b"this one is sent whole".to_vec());
+    let (slow_sha, quick_sha) = (sha256_hex(&slow), sha256_hex(&quick));
+    let slow_ticket = ann.granted("put", "c", &slow_sha, Some(slow.len() as u64)).await;
+    let quick_ticket = ann.granted("put", "c", &quick_sha, Some(quick.len() as u64)).await;
+
+    // An upload that sends its first bytes and then stalls, keeping the connection open.
+    let request = format!(
+        "PUT /blob/{slow_sha} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {slow_ticket}\r\nContent-Length: {}\r\n\r\nthis ",
+        relay.host,
+        slow.len()
+    );
+    let host = relay.host.clone();
+    let stalled = tokio::task::spawn_blocking(move || {
+        let mut stream = std::net::TcpStream::connect(&host).unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        String::from_utf8_lossy(&response).to_string()
+    });
+    // It is being received once its temporary file is there.
+    let deadline = Instant::now() + WAIT;
+    while stored_blobs(&relay).is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(stored_blobs(&relay)[0].starts_with(".tmp-"));
+
+    // Meanwhile a second one is told to come back, and keeps its ticket.
+    let bearer = format!("Bearer {quick_ticket}");
+    let path = format!("/blob/{quick_sha}");
+    let (status, headers, _) = http_send(&relay.host, "PUT", &path, &[("Authorization", &bearer)], &quick).await;
+    assert_eq!(status, 503);
+    assert!(headers.contains("retry-after: 1"), "{headers}");
+
+    // The stalled one is cut off after the limit and leaves nothing behind.
+    let response = stalled.await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+    assert!(stored_blobs(&relay).is_empty());
+    assert_eq!(blob_put(&relay, &slow_sha, &slow_ticket, &slow).await, 401);
+    // And the second one goes through with the ticket it had.
+    assert_eq!(blob_put(&relay, &quick_sha, &quick_ticket, &quick).await, 201);
+    assert_eq!(stored_blobs(&relay), vec![quick_sha]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uploads_are_limited_in_size_in_total_and_in_number() {
+    let relay = TestRelay::start_with(|cfg| {
+        cfg.limits.blob_max_bytes = 1_000;
+        cfg.limits.blob_quota_bytes = 2_500;
+        cfg.limits.blob_put_max = 5;
+    })
+    .await;
+    let mut ann = relay.owner("Ann").await;
+    let mut bea = relay.join(&mut ann, "member", "Bea").await;
+    ann.must("conv.put", json!({"conv": "c", "name": "C"})).await;
+    let files: Vec<Vec<u8>> = (0..4).map(|salt| binary(1_000, salt)).collect();
+    let shas: Vec<String> = files.iter().map(|f| sha256_hex(f)).collect();
+
+    // One byte over the limit for a file.
+    let reply = ann.ticket("put", "c", &sha256_hex(&binary(1_001, 9)), Some(1_001)).await;
+    assert_eq!((error_code(&reply), reply["message"].as_str().unwrap()), ("too_big", "the file is larger than this relay accepts"));
+
+    // Three tickets while nothing is stored: each fits by itself. Stored, only two do.
+    let mut tickets = Vec::new();
+    for sha in &shas[..3] {
+        tickets.push(ann.granted("put", "c", sha, Some(1_000)).await);
+    }
+    assert_eq!(blob_put(&relay, &shas[0], &tickets[0], &files[0]).await, 201);
+    assert_eq!(blob_put(&relay, &shas[1], &tickets[1], &files[1]).await, 201);
+    assert_eq!(blob_put(&relay, &shas[2], &tickets[2], &files[2]).await, 507);
+    assert_eq!(stored_blobs(&relay).len(), 2);
+
+    // Now the ticket itself is refused, for anyone; what still fits is not.
+    for peer in [&mut ann, &mut bea] {
+        assert_eq!(error_code(&peer.ticket("put", "c", &shas[3], Some(1_000)).await), "quota");
+        assert_eq!(error_code(&peer.ticket("put", "c", &shas[3], Some(501)).await), "quota");
+    }
+    // What the relay has is still offered, full or not, and costs nothing.
+    for _ in 0..10 {
+        assert_eq!(ann.ticket("put", "c", &shas[0], Some(1_000)).await["have"], json!(true));
+    }
+    let small = binary(500, 5);
+    let ticket = ann.granted("put", "c", &sha256_hex(&small), Some(500)).await;
+    assert_eq!(blob_put(&relay, &sha256_hex(&small), &ticket, &small).await, 201);
+    assert_eq!(error_code(&ann.ticket("put", "c", &sha256_hex(b"x"), Some(1)).await), "quota");
+
+    // Bea has asked for none that was granted; Ann for four. Five per window each.
+    let empty = sha256_hex(b"");
+    assert_eq!(t(&ann.ticket("put", "c", &empty, Some(0)).await), "blob.ticket");
+    let reply = ann.ticket("put", "c", &empty, Some(0)).await;
+    assert_eq!(reply, json!({"t": "error", "id": "t1", "code": "rate_limited", "message": "uploading too fast"}));
+    for _ in 0..5 {
+        assert_eq!(t(&bea.ticket("put", "c", &empty, Some(0)).await), "blob.ticket");
+    }
+    assert_eq!(error_code(&bea.ticket("put", "c", &empty, Some(0)).await), "rate_limited");
+    // Fetching is not counted as uploading.
+    ann.must("file.put", json!({"conv": "c", "path": "a.bin", "sha": shas[0], "size": 1_000})).await;
+    assert_eq!(bea.download(&relay, "c", &shas[0]).await, files[0]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_holds_only_so_many_unused_tickets() {
+    let relay = TestRelay::start_with(|cfg| cfg.limits.blob_tickets_per_member = 2).await;
+    let mut ann = relay.owner("Ann").await;
+    let mut bea = relay.join(&mut ann, "member", "Bea").await;
+    ann.must("conv.put", json!({"conv": "c", "name": "C"})).await;
+    let (sha, _) = ann.put_file(&relay, "c", "a.txt", b"content").await;
+
+    let first = ann.granted("get", "c", &sha, None).await;
+    let _second = ann.granted("get", "c", &sha, None).await;
+    assert_eq!(error_code(&ann.ticket("get", "c", &sha, None).await), "rate_limited");
+    assert_eq!(error_code(&ann.ticket("put", "c", &sha256_hex(b"new"), Some(3)).await), "rate_limited");
+    // Someone else's are their own, and a used one makes room.
+    assert_eq!(bea.download(&relay, "c", &sha).await, b"content");
+    assert_eq!(blob_get(&relay, &sha, &first).await.0, 200);
+    assert_eq!(t(&ann.ticket("get", "c", &sha, None).await), "blob.ticket");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn file_paths_are_checked_by_the_relay() {
+    let relay = TestRelay::start_with(|cfg| cfg.limits.publish_max = 1_000).await;
+    let mut ann = relay.owner("Ann").await;
+    ann.must("conv.put", json!({"conv": "c", "name": "C"})).await;
+    let (sha, size) = ann.upload(&relay, "c", b"content").await;
+
+    let too_long = "x".repeat(301);
+    for path in [
+        "../outside.txt", "a/../../b", "..", "/etc/passwd", "a//b", "a/", "", ".env", "a/.ssh/id", "./a",
+        "a\\b", "..\\b", "a\nb", "a\u{0}b", "a\u{1b}[0m", "name.", "name ", "a..b", "a/b/c/d/e/f/g/h/i", &too_long,
+    ] {
+        for (kind, body) in [
+            ("file.put", json!({"conv": "c", "path": path, "sha": sha, "size": size})),
+            ("file.drop", json!({"conv": "c", "path": path})),
+        ] {
+            let reply = ann.publish(kind, body).await;
+            assert_eq!(error_code(&reply), "bad_body", "{kind} {path:?}");
+        }
+    }
+    assert_eq!(ann.ask(json!({"t": "files.list", "conv": "c"})).await["files"], json!([]));
+
+    // Eight segments, 300 bytes and names in any script are fine.
+    let longest = "y".repeat(300);
+    for path in ["a/b/c/d/e/f/g/h", "보고서/1분기 실적.xlsx", "notes (v2).final.md", &longest] {
+        ann.must("file.put", json!({"conv": "c", "path": path, "sha": sha, "size": size})).await;
+    }
+    assert_eq!(ann.ask(json!({"t": "files.list", "conv": "c"})).await["files"].as_array().unwrap().len(), 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_keeps_every_version_and_deletions_are_shared() {
+    let relay = TestRelay::start().await;
+    let mut ann = relay.owner("Ann").await;
+    let mut bea = relay.join(&mut ann, "member", "Bea").await;
+    ann.must("conv.put", json!({"conv": "c", "name": "C"})).await;
+    ann.must("conv.put", json!({"conv": "other", "name": "Other"})).await;
+    let put = |path: &str, file: &(String, u64), base: Option<&str>| {
+        let mut body = json!({"conv": "c", "path": path, "sha": file.0, "size": file.1});
+        if let Some(base) = base {
+            body["base"] = json!(base);
+        }
+        body
+    };
+
+    let v1 = ann.upload(&relay, "c", b"version one").await;
+    let v2 = ann.upload(&relay, "c", b"version two").await;
+    let v3 = bea.upload(&relay, "c", b"version three").await;
+    let (elsewhere, _) = ann.put_file(&relay, "other", "plan.md", b"in another channel").await;
+
+    // A first version; the same again is not a change; another spelling is the same file.
+    assert_eq!(ann.must("file.put", put("Plan.md", &v1, Some(""))).await, 4);
+    assert_eq!(error_code(&bea.publish("file.put", put("plan.md", &v1, None)).await), "unchanged");
+    assert_eq!(ann.must("file.put", put("plan.md", &v2, Some(&v1.0))).await, 5);
+    let listed = bea.ask(json!({"t": "files.list", "conv": "c"})).await;
+    assert_eq!(listed["files"].as_array().unwrap().len(), 1);
+    assert_eq!((&listed["files"][0]["path"], &listed["files"][0]["sha"], &listed["files"][0]["seq"]), (&json!("plan.md"), &json!(v2.0), &json!(5)));
+
+    // Bea started from version one too, and is told what is there instead.
+    let event = bea.sign("file.put", put("plan.md", &v3, Some(&v1.0)));
+    let reply = bea.send_event(&event).await;
+    assert_eq!(
+        reply,
+        json!({
+            "t": "error", "id": event.id, "code": "stale", "current": v2.0,
+            "message": "the file at this path is not the one this change started from",
+        })
+    );
+    // "There is no file there" against one that is there.
+    let reply = bea.publish("file.put", put("plan.md", &v3, Some(""))).await;
+    assert_eq!((error_code(&reply), &reply["current"]), ("stale", &json!(v2.0)));
+    // `unchanged` comes before `stale`.
+    assert_eq!(error_code(&bea.publish("file.put", put("plan.md", &v2, Some(&v1.0))).await), "unchanged");
+    // From what is there, it goes through.
+    assert_eq!(bea.must("file.put", put("plan.md", &v3, Some(&v2.0))).await, 6);
+
+    // Deleting: for a file that is there, from the version that is there.
+    assert_eq!(error_code(&ann.publish("file.drop", json!({"conv": "c", "path": "never.md"})).await), "not_found");
+    let reply = ann.publish("file.drop", json!({"conv": "c", "path": "plan.md", "base": v2.0})).await;
+    assert_eq!((error_code(&reply), &reply["current"]), ("stale", &json!(v3.0)));
+    let reply = ann.publish("file.drop", json!({"conv": "c", "path": "plan.md", "base": ""})).await;
+    assert_eq!((error_code(&reply), &reply["current"]), ("stale", &json!(v3.0)));
+    let dropped = json!({"conv": "c", "path": "PLAN.md", "base": v3.0, "by": {"agent": "Cleaner"}});
+    assert_eq!(ann.must("file.drop", dropped).await, 7);
+    // Everyone who reads the channel is sent the deletion, live and in sync.
+    let live = bea.live_until(7).await;
+    assert_eq!(live.last().unwrap()["kind"], json!("file.drop"));
+    let (events, _) = bea.sync_all(0, Some("c")).await;
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, vec!["conv.put", "file.put", "file.put", "file.put", "file.drop"]);
+    assert_eq!(error_code(&bea.publish("file.drop", json!({"conv": "c", "path": "plan.md"})).await), "not_found");
+
+    // The listing: nothing by default, the deleted path when asked for.
+    assert_eq!(bea.ask(json!({"t": "files.list", "id": "a", "conv": "c"})).await, json!({"t": "files", "id": "a", "conv": "c", "files": []}));
+    let listed = bea.ask(json!({"t": "files.list", "id": "b", "conv": "c", "deleted": true})).await;
+    let created_at = listed["files"][0]["created_at"].clone();
+    assert_eq!(
+        listed,
+        json!({"t": "files", "id": "b", "conv": "c", "files": [{
+            "path": "PLAN.md", "sha": null, "size": 0, "seq": 7, "pubkey": ann.pk(), "created_at": created_at,
+            "by": {"agent": "Cleaner", "color": null}, "deleted": true,
+        }]})
+    );
+    assert_eq!(bea.ask(json!({"t": "files.list", "conv": "c", "deleted": false})).await["files"], json!([]));
+
+    // The history: newest first, the deletion among the versions.
+    let history = bea.ask(json!({"t": "files.history", "id": "h", "conv": "c", "path": "plan.MD"})).await;
+    assert_eq!((t(&history), &history["id"], &history["conv"], &history["path"]), ("files.history", &json!("h"), &json!("c"), &json!("plan.MD")));
+    let versions = history["versions"].as_array().unwrap();
+    let rows: Vec<(u64, Value, bool)> =
+        versions.iter().map(|v| (v["seq"].as_u64().unwrap(), v["sha"].clone(), v["deleted"].as_bool().unwrap())).collect();
+    assert_eq!(rows, vec![(7, Value::Null, true), (6, json!(v3.0), false), (5, json!(v2.0), false), (4, json!(v1.0), false)]);
+    assert_eq!(
+        versions[1],
+        json!({"sha": v3.0, "size": v3.1, "seq": 6, "pubkey": bea.pk(), "created_at": versions[1]["created_at"], "by": null, "deleted": false})
+    );
+    assert_eq!(versions[0]["by"], json!({"agent": "Cleaner", "color": null}));
+    let none = bea.ask(json!({"t": "files.history", "conv": "c", "path": "never.md"})).await;
+    assert_eq!(none, json!({"t": "files.history", "conv": "c", "path": "never.md", "versions": []}));
+
+    // Every version that was in the channel can still be fetched; one from another channel cannot.
+    assert_eq!(bea.download(&relay, "c", &v1.0).await, b"version one");
+    assert_eq!(bea.download(&relay, "c", &v3.0).await, b"version three");
+    assert_eq!(error_code(&bea.ticket("get", "c", &elsewhere, None).await), "not_found");
+    assert_eq!(error_code(&bea.ticket("get", "other", &v1.0, None).await), "not_found");
+    assert_eq!(bea.download(&relay, "other", &elsewhere).await, b"in another channel");
+
+    // Restoring is putting an old version back: the relay has the bytes.
+    let reply = bea.ticket("put", "c", &v1.0, Some(v1.1)).await;
+    assert_eq!(reply["have"], json!(true));
+    let reply = bea.publish("file.put", put("plan.md", &v1, Some(&v3.0))).await;
+    assert_eq!((error_code(&reply), &reply["current"]), ("stale", &json!("")));
+    assert_eq!(bea.must("file.put", put("plan.md", &v1, Some(""))).await, 8);
+    let listed = ann.ask(json!({"t": "files.list", "conv": "c", "deleted": true})).await;
+    assert_eq!(listed["files"].as_array().unwrap().len(), 1);
+    assert_eq!((&listed["files"][0]["path"], &listed["files"][0]["sha"], listed["files"][0].get("deleted")), (&json!("plan.md"), &json!(v1.0), None));
+    let history = ann.ask(json!({"t": "files.history", "conv": "c", "path": "plan.md"})).await;
+    assert_eq!(history["versions"].as_array().unwrap().len(), 5);
+    // Nothing was ever removed from the relay's disk.
+    assert_eq!(stored_blobs(&relay).len(), 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_of_a_private_channel_stay_inside_it() {
+    let relay = TestRelay::start().await;
+    let mut owner = relay.owner("Olga").await;
+    let mut ann = relay.join(&mut owner, "member", "Ann").await;
+    let mut bea = relay.join(&mut owner, "member", "Bea").await;
+    owner.must("conv.put", json!({"conv": "pub", "name": "Public"})).await;
+    ann.must("conv.put", json!({"conv": "p", "name": "Plans", "private": true})).await;
+    ann.must("conv.add", json!({"conv": "p", "member": bea.pk()})).await;
+    let content = b"the secret plan".to_vec();
+    let (sha, seq) = ann.put_file(&relay, "p", "plan.md", &content).await;
+    let size = content.len() as u64;
+    assert_eq!(seq, 4);
+    let marker = owner.must("msg.post", post("pub", "m1", "hello all")).await;
+
+    // The owner is not in the channel, and is told what anyone is told about a
+    // channel that was never made, whether the hash and the path exist or not.
+    let (mine, my_size) = owner.upload(&relay, "pub", b"the owner's own").await;
+    for conv in ["p", "nowhere"] {
+        for (op, sha, size) in [("put", &sha, Some(size)), ("put", &mine, Some(my_size)), ("put", &sha, Some(9_999_999_999)), ("get", &sha, None), ("get", &mine, None)] {
+            assert_eq!(owner.ticket(op, conv, sha, size).await, no_conv(Some("t1")), "{op} in {conv}");
+        }
+        for (kind, body) in [
+            ("file.put", json!({"conv": conv, "path": "plan.md", "sha": sha, "size": size})),
+            ("file.put", json!({"conv": conv, "path": "new.md", "sha": mine, "size": my_size})),
+            ("file.put", json!({"conv": conv, "path": "plan.md", "sha": mine, "size": my_size, "base": sha})),
+            ("file.drop", json!({"conv": conv, "path": "plan.md"})),
+            ("file.drop", json!({"conv": conv, "path": "plan.md", "base": sha})),
+            ("file.drop", json!({"conv": conv, "path": "never.md"})),
+        ] {
+            let reply = owner.publish(kind, body).await;
+            assert_eq!((error_code(&reply), reply.get("current")), ("no_conv", None), "{kind} in {conv}");
+            assert_eq!(reply["message"], json!("the channel does not exist"));
+        }
+        assert_eq!(owner.ask(json!({"t": "files.list", "id": "q", "conv": conv})).await, no_conv(Some("q")));
+        assert_eq!(owner.ask(json!({"t": "files.list", "conv": conv, "deleted": true})).await, no_conv(None));
+        assert_eq!(owner.ask(json!({"t": "files.history", "id": "q", "conv": conv, "path": "plan.md"})).await, no_conv(Some("q")));
+        assert_eq!(owner.ask(json!({"t": "file.touch", "conv": conv, "path": "plan.md", "on": true})).await, no_conv(None));
+    }
+
+    // The event went to the two in the channel, live and in sync, and to nobody else.
+    assert_eq!(seqs(&owner.live_until(marker).await), vec![1, 5]);
+    assert_eq!(seqs(&owner.sync_all(0, None).await.0), vec![1, 5]);
+    let live = bea.live_until(marker).await;
+    assert_eq!(seqs(&live), vec![1, 3, 4, 5]);
+    assert_eq!((&live[2]["kind"], live[2]["body"].as_str().unwrap().contains(&sha)), (&json!("file.put"), true));
+    assert_eq!(seqs(&bea.sync_all(0, Some("p")).await.0), vec![2, 3, 4]);
+    assert_eq!(bea.download(&relay, "p", &sha).await, content);
+
+    // Bea is taken out while holding a ticket: it opens nothing any more, and nothing was deleted.
+    let held = bea.granted("get", "p", &sha, None).await;
+    ann.must("conv.remove", json!({"conv": "p", "member": bea.pk()})).await;
+    assert_eq!(blob_get(&relay, &sha, &held).await.0, 401);
+    assert_eq!(bea.ticket("get", "p", &sha, None).await, no_conv(Some("t1")));
+    assert_eq!(bea.ask(json!({"t": "files.list", "conv": "p"})).await, no_conv(None));
+    assert_eq!(error_code(&bea.publish("file.drop", json!({"conv": "p", "path": "plan.md"})).await), "no_conv");
+    assert_eq!(ann.ask(json!({"t": "files.list", "conv": "p"})).await["files"].as_array().unwrap().len(), 1);
+    assert_eq!(ann.download(&relay, "p", &sha).await, content);
+
+    // The same when the uploader leaves the team: their tickets go, their files stay.
+    let (from_ann, _) = ann.put_file(&relay, "pub", "shared.md", b"from ann").await;
+    let held = ann.granted("get", "pub", &from_ann, None).await;
+    assert_eq!(t(&owner.ask(json!({"t": "member.remove", "pubkey": ann.pk()})).await), "ok");
+    assert_eq!(blob_get(&relay, &from_ann, &held).await.0, 401);
+    assert_eq!(owner.download(&relay, "pub", &from_ann).await, b"from ann");
+    assert_eq!(owner.ask(json!({"t": "files.list", "conv": "pub"})).await["files"][0]["pubkey"], json!(ann.pk()));
+    assert_eq!(stored_blobs(&relay).len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_touch_reaches_the_other_readers_and_is_not_kept() {
+    let relay = TestRelay::start_with(|cfg| cfg.limits.touch_max = 5).await;
+    let mut ann = relay.owner("Ann").await;
+    let mut bea = relay.join(&mut ann, "member", "Bea").await;
+    let mut cy = relay.join(&mut ann, "member", "Cy").await;
+    // A second connection of Ann's: it is the same member, so not "another".
+    let mut ann_too = auth(&relay, &ann.key).await.unwrap();
+    ann.must("conv.put", json!({"conv": "pub", "name": "Public"})).await;
+    ann.must("conv.put", json!({"conv": "p", "name": "Plans", "private": true})).await;
+    ann.must("conv.add", json!({"conv": "p", "member": bea.pk()})).await;
+
+    // In a private channel: to the other member of it, and to nobody else.
+    let touch = json!({"t": "file.touch", "conv": "p", "path": "docs/Plan.md", "on": true, "by": {"agent": "Builder", "color": "#1FA864"}});
+    send(&mut ann.sock, touch).await;
+    // In a public one: to everyone else. Neither is answered, so the next reply is the pong.
+    send(&mut ann.sock, json!({"t": "file.touch", "conv": "pub", "path": "notes.md", "on": false})).await;
+    assert_eq!(ann.ask(json!({"t": "ping"})).await, json!({"t": "pong"}));
+    let marker = ann.must("msg.post", post("pub", "m1", "marker")).await;
+
+    let private = json!({
+        "t": "file.touch", "conv": "p", "path": "docs/Plan.md", "on": true, "pubkey": ann.pk(),
+        "by": {"agent": "Builder", "color": "#1FA864"},
+    });
+    let public = json!({"t": "file.touch", "conv": "pub", "path": "notes.md", "on": false, "pubkey": ann.pk(), "by": null});
+    assert_eq!(bea.broadcast("file.touch").await, private);
+    assert_eq!(bea.broadcast("file.touch").await, public);
+    assert_eq!(cy.broadcast("file.touch").await, public);
+    for peer in [&mut bea, &mut cy] {
+        let rest = peer.kinds_until(marker).await;
+        assert!(!rest.contains(&"file.touch".to_string()), "{rest:?}");
+    }
+    // The sender hears nothing, on this connection or another.
+    for peer in [&mut ann, &mut ann_too] {
+        let seen = peer.kinds_until(marker).await;
+        assert!(!seen.contains(&"file.touch".to_string()), "{seen:?}");
+    }
+    // Nothing of it is stored: not an event, not a version.
+    assert_eq!(seqs(&bea.sync_all(0, None).await.0), vec![1, 2, 3, 4]);
+    assert_eq!(bea.ask(json!({"t": "files.history", "conv": "p", "path": "docs/Plan.md"})).await["versions"], json!([]));
+
+    // Someone outside the channel cannot touch in it; a bad path or author is refused.
+    let reply = cy.ask(json!({"t": "file.touch", "conv": "p", "path": "docs/Plan.md", "on": true})).await;
+    assert_eq!(reply, no_conv(None));
+    // Sent with an id, the refusal repeats it, so a client can tell it from one that matters to the person.
+    let reply = cy.ask(json!({"t": "file.touch", "id": "q-touch", "conv": "p", "path": "docs/Plan.md", "on": true})).await;
+    assert_eq!((&reply["id"], &reply["code"]), (&json!("q-touch"), &json!("no_conv")));
+    for bad in [
+        json!({"t": "file.touch", "conv": "pub", "path": "../x", "on": true}),
+        json!({"t": "file.touch", "conv": "pub", "path": "a.md", "on": true, "by": {"agent": ""}}),
+        json!({"t": "file.touch", "conv": "pub", "path": "a.md", "on": "yes"}),
+        json!({"t": "file.touch", "conv": "pub", "path": "a.md"}),
+    ] {
+        assert_eq!(error_code(&cy.ask(bad.clone()).await), "bad_request", "{bad}");
+    }
+    let marker = cy.must("msg.post", post("pub", "m2", "marker")).await;
+    assert_eq!(bea.kinds_until(marker).await, Vec::<String>::new());
+
+    // Five touches a window per connection, counted whether or not they were passed on.
+    // Cy has made four (a frame that could not be read at all is not one).
+    send(&mut cy.sock, json!({"t": "file.touch", "conv": "pub", "path": "a.md", "on": true})).await;
+    let reply = cy.ask(json!({"t": "file.touch", "conv": "pub", "path": "a.md", "on": true})).await;
+    assert_eq!(reply, json!({"t": "error", "code": "rate_limited", "message": "touching too fast"}));
+    // The one before it was passed on, to every connection of the others.
+    for peer in [&mut bea, &mut ann, &mut ann_too] {
+        assert_eq!(peer.broadcast("file.touch").await["pubkey"], json!(cy.pk()));
+    }
+    // Another connection has its own count.
+    send(&mut bea.sock, json!({"t": "file.touch", "conv": "p", "path": "docs/Plan.md", "on": false})).await;
+    for peer in [&mut ann, &mut ann_too] {
+        let touch = peer.broadcast("file.touch").await;
+        assert_eq!((&touch["pubkey"], &touch["on"]), (&json!(bea.pk()), &json!(false)));
+    }
+}
+
 // ---- migration -----------------------------------------------------------------------
 
 /// The schema of version 1, as relays before per-channel access created it.
@@ -1789,7 +2563,7 @@ async fn a_version_1_database_is_served_after_migration() {
     // Opening the file again is not a second migration.
     let conn = rusqlite::Connection::open(&relay.cfg.db_path).unwrap();
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     cube_relay::owner_invite(&relay.cfg, 7).unwrap();
 }
 
@@ -1816,7 +2590,7 @@ async fn a_version_1_row_with_an_unreadable_body_stops_the_relay_from_starting()
         limits: Limits::default(),
     };
     let error = cube_relay::serve(cfg.clone(), listener, CancellationToken::new()).await.unwrap_err().to_string();
-    assert!(error.contains("from schema version 1 to 2"), "{error}");
+    assert!(error.contains("from schema version 1 to 3"), "{error}");
     assert!(error.contains("left unchanged"), "{error}");
     assert!(error.contains("event 3 (msg.post)"), "{error}");
     assert!(cube_relay::owner_invite(&cfg, 7).is_err());
@@ -1850,7 +2624,15 @@ async fn a_version_1_row_with_an_unreadable_body_stops_the_relay_from_starting()
 fn run(program: &str, args: &[&str], env: &[(&str, &str)]) -> (bool, String, String) {
     let mut command = Command::new(program);
     command.args(args).env_remove("RUST_LOG");
-    for name in ["CUBE_RELAY_BIND", "CUBE_RELAY_DB", "CUBE_RELAY_NAME", "CUBE_RELAY_PUBLIC_HOST", "CUBE_RELAY_TRUSTED_PROXY"] {
+    for name in [
+        "CUBE_RELAY_BIND",
+        "CUBE_RELAY_DB",
+        "CUBE_RELAY_NAME",
+        "CUBE_RELAY_PUBLIC_HOST",
+        "CUBE_RELAY_TRUSTED_PROXY",
+        "CUBE_RELAY_BLOB_MAX_MB",
+        "CUBE_RELAY_BLOB_QUOTA_MB",
+    ] {
         command.env_remove(name);
     }
     for (name, value) in env {
@@ -2026,7 +2808,7 @@ async fn cube_peer_private_channels() {
         let join = |key: &str, link: &str, name: &str| lines(&["--key", key, "join", link, "--name", name]).pop().unwrap();
 
         let joined = join(&ann_key, &link, "Ann");
-        assert_eq!(joined["features"], json!(["channels", "join-page", "profiles"]));
+        assert_eq!(joined["features"], json!(["channels", "join-page", "profiles", "files"]));
         assert_eq!(joined["settings"], json!({"member_invites": true}));
         let ann_pk = joined["you"]["pubkey"].as_str().unwrap().to_string();
 
@@ -2040,7 +2822,7 @@ async fn cube_peer_private_channels() {
         let bea_pk = joined["you"]["pubkey"].as_str().unwrap().to_string();
         let status = bea(&["status"]);
         assert_eq!((status["head"].clone(), status["you"]["role"].clone()), (json!(0), json!("member")));
-        assert_eq!(status["features"], json!(["channels", "join-page", "profiles"]));
+        assert_eq!(status["features"], json!(["channels", "join-page", "profiles", "files"]));
         assert_eq!(bea(&["sync"]), json!({"ok": true, "events": 0, "next": 0}));
         assert_eq!(bea(&["post", "plans", "hello?"])["code"], json!("no_conv"));
         assert_eq!(bea(&["members", "plans"])["code"], json!("no_conv"));
@@ -2080,6 +2862,122 @@ async fn cube_peer_private_channels() {
         assert_eq!(ann(&["settings", "--member-invites", "false"]), json!({"ok": true, "member_invites": false}));
         assert_eq!(cy(&["status"])["settings"], json!({"member_invites": false}));
         assert_eq!(cy(&["invite", "--conv", "plans"])["code"], json!("forbidden"));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cube_peer_files() {
+    let relay = TestRelay::start().await;
+    let link = cube_relay::owner_invite(&relay.cfg, 7).unwrap();
+    let (url, host) = (relay.url(), relay.host.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    let (ann_key, bea_key, cy_key) = (file("ann.key"), file("bea.key"), file("cy.key"));
+    let (first, second, fetched) = (file("Plan.md"), file("plan-v2.md"), file("fetched.md"));
+    std::fs::write(&first, b"version one\n").unwrap();
+    std::fs::write(&second, b"version two\n").unwrap();
+    let blobs = relay.cfg.blob_dir();
+
+    tokio::task::spawn_blocking(move || {
+        let peer = env!("CARGO_BIN_EXE_cube-peer");
+        let json = |args: &[&str]| -> Value {
+            let (ok, stdout, stderr) = run(peer, args, &[]);
+            assert_eq!(stdout.lines().count(), 1, "{stdout} {stderr}");
+            let value: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| panic!("{stdout} {stderr}"));
+            assert_eq!(value["ok"], json!(ok), "{value}");
+            value
+        };
+        let as_peer = |key: &str, args: &[&str]| {
+            json(&[&["--key", key, "--relay", url.as_str(), "--host", host.as_str()][..], args].concat())
+        };
+        let ann = |args: &[&str]| as_peer(&ann_key, args);
+        let bea = |args: &[&str]| as_peer(&bea_key, args);
+        let cy = |args: &[&str]| as_peer(&cy_key, args);
+
+        json(&["--key", &ann_key, "join", &link, "--name", "Ann"]);
+        assert_eq!(ann(&["conv", "plans", "Plans", "--private"])["seq"], json!(1));
+        let invite = ann(&["invite", "--conv", "plans"]);
+        json(&["--key", &bea_key, "join", invite["link"].as_str().unwrap(), "--name", "Bea"]);
+        json(&["--key", &cy_key, "join", ann(&["invite"])["link"].as_str().unwrap(), "--name", "Cy"]);
+
+        // Ann puts a file in the folder: ticket, upload, event.
+        let v1 = sha256_hex(b"version one\n");
+        let put = ann(&["put-file", "plans", &first, "--agent", "Builder", "--base", ""]);
+        assert_eq!(
+            (put["seq"].clone(), put["kind"].clone(), put["path"].clone(), put["sha"].clone(), put["size"].clone(), put["uploaded"].clone()),
+            (json!(2), json!("file.put"), json!("Plan.md"), json!(v1), json!(12), json!(true))
+        );
+        assert_eq!(std::fs::read(blobs.join(&v1)).unwrap(), b"version one\n");
+        // The same again changes nothing.
+        assert_eq!(ann(&["put-file", "plans", &first])["code"], json!("unchanged"));
+
+        // Bea sees it and fetches it; the bytes are checked against the hash.
+        let listed = bea(&["files", "plans"]);
+        assert_eq!(listed["conv"], json!("plans"));
+        assert_eq!(listed["files"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["files"][0]["by"], json!({"agent": "Builder", "color": null}));
+        let got = bea(&["get-file", "plans", "plan.md", &fetched]);
+        assert_eq!((got["sha"].clone(), got["size"].clone()), (json!(v1), json!(12)));
+        assert_eq!(std::fs::read(&fetched).unwrap(), b"version one\n");
+
+        // Bea replaces it from the version she fetched; Ann, still on that version, is told so.
+        let v2 = sha256_hex(b"version two\n");
+        let put = bea(&["put-file", "plans", &second, "--path", "plan.md", "--base", &v1]);
+        assert_eq!((put["seq"].clone(), put["uploaded"].clone()), (json!(3), json!(true)));
+        let stale = ann(&["drop-file", "plans", "plan.md", "--base", &v1]);
+        assert_eq!((stale["code"].clone(), stale["current"].clone()), (json!("stale"), json!(v2)));
+        let dropped = ann(&["drop-file", "plans", "plan.md", "--base", &v2]);
+        assert_eq!((dropped["seq"].clone(), dropped["kind"].clone()), (json!(4), json!("file.drop")));
+        assert_eq!(bea(&["files", "plans"])["files"], json!([]));
+        assert_eq!(bea(&["files", "plans", "--deleted"])["files"][0]["deleted"], json!(true));
+        assert_eq!(bea(&["get-file", "plans", "plan.md", &fetched])["code"], json!("not_found"));
+
+        // The history is all there, and an old version can be fetched and put back
+        // without sending it again.
+        let history = bea(&["history", "plans", "Plan.md"]);
+        let shas: Vec<Value> = history["versions"].as_array().unwrap().iter().map(|v| v["sha"].clone()).collect();
+        assert_eq!(shas, vec![Value::Null, json!(v2), json!(v1)]);
+        let got = bea(&["get-file", "plans", "plan.md", &fetched, "--sha", &v2]);
+        assert_eq!(got["size"], json!(12));
+        assert_eq!(std::fs::read(&fetched).unwrap(), b"version two\n");
+        let restored = bea(&["put-file", "plans", &first, "--path", "plan.md", "--base", ""]);
+        assert_eq!((restored["seq"].clone(), restored["uploaded"].clone()), (json!(5), json!(false)));
+
+        // Cy is on the team but not in the channel.
+        for args in [
+            &["files", "plans"][..],
+            &["history", "plans", "plan.md"][..],
+            &["get-file", "plans", "plan.md", &fetched, "--sha", &v1][..],
+            &["put-file", "plans", &first][..],
+            &["drop-file", "plans", "plan.md"][..],
+            &["touch", "plans", "plan.md"][..],
+        ] {
+            assert_eq!(cy(args)["code"], json!("no_conv"), "{args:?}");
+        }
+        assert_eq!(cy(&["sync"]), json!({"ok": true, "events": 0, "next": 0}));
+
+        // Bea listens while Ann says she is working on the file, then stops.
+        let mut listener = Command::new(peer)
+            .args(["--key", &bea_key, "--relay", &url, "--host", &host, "listen", "--from", "4"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = BufReader::new(listener.stdout.take().unwrap()).lines();
+        // Once the history is replayed, what follows arrives live.
+        let replayed: Value = serde_json::from_str(&stdout.next().unwrap().unwrap()).unwrap();
+        assert_eq!((replayed["seq"].clone(), replayed["kind"].clone()), (json!(5), json!("file.put")));
+        assert_eq!(ann(&["touch", "plans", "plan.md", "--agent", "Builder"]), json!({"ok": true, "conv": "plans", "path": "plan.md", "on": true}));
+        assert_eq!(ann(&["touch", "plans", "plan.md", "--off"])["on"], json!(false));
+        let ann_pk = ann(&["status"])["you"]["pubkey"].clone();
+        for on in [true, false] {
+            let line: Value = serde_json::from_str(&stdout.next().unwrap().unwrap()).unwrap();
+            let by = if on { json!({"agent": "Builder", "color": null}) } else { Value::Null };
+            assert_eq!(line, json!({"t": "file.touch", "conv": "plans", "path": "plan.md", "on": on, "pubkey": ann_pk, "by": by}));
+        }
+        listener.kill().unwrap();
+        listener.wait().unwrap();
     })
     .await
     .unwrap();

@@ -1,5 +1,6 @@
-//! The WebSocket side of the relay: handshake, frames after `ready`, and
-//! passing accepted events on to the connected members who may read them.
+//! The network side of the relay: the WebSocket (handshake, frames after
+//! `ready`, passing accepted events on to the connected members who may read
+//! them) and the two HTTP requests that carry a file's bytes.
 //!
 //! All shared state sits behind one mutex that is never held across an
 //! `.await`. A publish is stored and handed to the queues of its audience
@@ -7,6 +8,9 @@
 //!
 //! Who may read what is decided in `db`. This module asks it for every event
 //! and every request and keeps no copy of a channel's member list.
+//!
+//! A file's bytes are read from and written to disk outside the lock. Only
+//! judging a ticket and recording a finished upload happen under it.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -14,8 +18,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
-use axum::http::HeaderMap;
+use axum::body::Body;
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
@@ -28,22 +34,36 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
+use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::blob::{Op, ReceiveError, Store, Tickets};
 use crate::config::Config;
 use crate::db::{
-    clean_member_name, is_pubkey, sha256_hex, valid_ident, Audience, Db, InviteTerms, Member, OpError,
-    Role, DEFAULT_INVITE_DAYS, MAX_INVITE_DAYS, MAX_INVITE_USES,
+    clean_file_author, clean_member_name, is_pubkey, is_sha256, sha256_hex, valid_file_path, valid_ident,
+    Audience, Db, InviteTerms, Member, OpError, Role, DEFAULT_INVITE_DAYS, MAX_INVITE_DAYS, MAX_INVITE_USES,
+    STALE_MESSAGE,
 };
 use crate::limiter::SlidingWindow;
 
 const RELAY_VERSION: &str = "cube-relay/1";
 /// What this relay does beyond the first version, named in `ready`.
 /// `channels`: private channels, channel member lists, `sync` by channel.
-const FEATURES: [&str; 3] = ["channels", "join-page", "profiles"];
+/// `files`: a shared folder per channel (`file.put`, `file.drop`, tickets,
+/// `/blob`, `files.list`, `files.history`, `file.touch`).
+const FEATURES: [&str; 4] = ["channels", "join-page", "profiles", "files"];
+/// The requests that may carry an `id`, which every answer to them repeats.
+const ASKS_WITH_ID: [&str; 3] = ["blob.ticket", "files.list", "files.history"];
+/// How many versions of one path `files.history` returns.
+const HISTORY_LIMIT: usize = 100;
+/// The longest ticket a request may present; the ones issued are 43 characters.
+const MAX_TICKET_CHARS: usize = 128;
+/// What goes out with every answer to a `/blob` request: the bytes are data,
+/// never a page, and nothing in between keeps a copy.
+const BLOB_HEADERS: [(&str, &str); 2] = [("x-content-type-options", "nosniff"), ("cache-control", "no-store")];
 /// How long a single write to a client may take before the handshake gives up.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -103,8 +123,33 @@ enum ClientFrame {
     ConvMembers { conv: String },
     #[serde(rename = "settings.set")]
     SettingsSet { member_invites: bool },
+    #[serde(rename = "blob.ticket")]
+    BlobTicket { id: Option<String>, op: String, conv: String, sha: String, size: Option<u64> },
+    #[serde(rename = "files.list")]
+    FilesList {
+        id: Option<String>,
+        conv: String,
+        #[serde(default)]
+        deleted: bool,
+    },
+    #[serde(rename = "files.history")]
+    FilesHistory { id: Option<String>, conv: String, path: String },
+    #[serde(rename = "file.touch")]
+    FileTouch { id: Option<String>, conv: String, path: String, on: bool, by: Option<serde_json::Value> },
     #[serde(rename = "ping")]
     Ping,
+}
+
+impl ClientFrame {
+    /// The `id` the client gave this request, to be repeated in its answer.
+    fn ask_id(&self) -> Option<&str> {
+        match self {
+            ClientFrame::BlobTicket { id, .. }
+            | ClientFrame::FilesList { id, .. }
+            | ClientFrame::FilesHistory { id, .. } => id.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -130,6 +175,12 @@ struct Core {
     publish_rate: SlidingWindow<String>,
     /// `sync` requests, per connection.
     sync_rate: SlidingWindow<u64>,
+    /// `file.touch` requests, per connection.
+    touch_rate: SlidingWindow<u64>,
+    /// Upload tickets issued, per key.
+    upload_rate: SlidingWindow<String>,
+    /// The tickets for `/blob` requests that are out.
+    tickets: Tickets,
 }
 
 /// An authenticated connection, as handed from the handshake to its tasks.
@@ -144,6 +195,10 @@ pub struct Relay {
     cfg: Config,
     ws: String,
     core: Mutex<Core>,
+    /// Where the bytes of files are kept.
+    blobs: Store,
+    /// One permit per upload being received.
+    uploads: Semaphore,
     shutdown: CancellationToken,
 }
 
@@ -162,6 +217,70 @@ fn error_frame(id: Option<&str>, code: &str, message: &str) -> Utf8Bytes {
         Some(id) => frame(json!({"t": "error", "id": id, "code": code, "message": message})),
         None => frame(json!({"t": "error", "code": code, "message": message})),
     }
+}
+
+/// What a request that broke a rule is answered with. `stale` also says what
+/// the channel has at the path, so the client can show both sides.
+fn refusal_frame(id: Option<&str>, error: &OpError) -> Utf8Bytes {
+    match error {
+        OpError::Refused { code, message } => error_frame(id, code, message),
+        OpError::Stale { current } => {
+            let mut reply = json!({"t": "error", "code": "stale", "message": STALE_MESSAGE, "current": current});
+            if let Some(id) = id {
+                reply["id"] = json!(id);
+            }
+            frame(reply)
+        }
+        OpError::Internal(_) => error_frame(id, "internal", "internal error"),
+    }
+}
+
+/// Adds the request's `id` to its answer, if it had one.
+fn with_id(mut reply: serde_json::Value, id: Option<String>) -> serde_json::Value {
+    if let Some(id) = id {
+        reply["id"] = json!(id);
+    }
+    reply
+}
+
+/// The `id` of a request that could not be read as a whole, if it is one of
+/// the kinds that carry one: its answer names it all the same.
+fn malformed_ask_id(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let kind = value.get("t")?.as_str()?;
+    if !ASKS_WITH_ID.contains(&kind) {
+        return None;
+    }
+    value.get("id")?.as_str().filter(|id| valid_ident(id)).map(str::to_string)
+}
+
+/// The ticket of a `/blob` request. It is read from the `Authorization`
+/// header and nowhere else: an address ends up in logs and histories.
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty() && token.len() <= MAX_TICKET_CHARS).then_some(token)
+}
+
+/// A short answer to a `/blob` request.
+fn blob_reply(status: StatusCode, text: &'static str) -> Response {
+    let mut response = Response::new(Body::from(text));
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+    for (name, value) in BLOB_HEADERS {
+        headers.insert(name, HeaderValue::from_static(value));
+    }
+    response
+}
+
+/// The one answer for a ticket that is missing, unknown, expired, used, or
+/// was issued for something else.
+fn blob_unauthorized() -> Response {
+    let mut response = blob_reply(StatusCode::UNAUTHORIZED, "a valid ticket is required\n");
+    response.headers_mut().insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    response
 }
 
 fn ok_frame() -> Utf8Bytes {
@@ -248,6 +367,21 @@ impl Core {
         }
     }
 
+    /// Queues a frame that is not stored for the connections of the members
+    /// in `audience`, leaving out the one who sent it.
+    fn deliver_to_others(&self, audience: &Audience, sender: &str, frame: &Utf8Bytes) {
+        for c in self.conns.values() {
+            let wanted = c.pubkey != sender
+                && match audience {
+                    Audience::Everyone => true,
+                    Audience::Only(members) => members.contains(&c.pubkey),
+                };
+            if wanted && c.tx.try_send(frame.clone()).is_err() {
+                c.kill.cancel();
+            }
+        }
+    }
+
     fn broadcast_members(&self) {
         match self.db.members() {
             Ok(members) => self.broadcast(&frame(json!({"t": "members", "members": members}))),
@@ -285,6 +419,9 @@ impl Relay {
     pub fn open(cfg: Config, shutdown: CancellationToken) -> Result<Arc<Relay>, BoxError> {
         let db = Db::open(&cfg.db_path, unix_now())?;
         let ws = db.ws().to_string();
+        let blob_dir = cfg.blob_dir();
+        let blobs = Store::open(&blob_dir)
+            .map_err(|e| format!("cannot keep files in {}: {e}", blob_dir.display()))?;
         let l = &cfg.limits;
         let core = Core {
             db,
@@ -294,8 +431,12 @@ impl Relay {
             fail_key: SlidingWindow::new(l.auth_fail_max, l.auth_fail_window),
             publish_rate: SlidingWindow::new(l.publish_max, l.publish_window),
             sync_rate: SlidingWindow::new(l.sync_max, l.sync_window),
+            touch_rate: SlidingWindow::new(l.touch_max, l.touch_window),
+            upload_rate: SlidingWindow::new(l.blob_put_max, l.blob_put_window),
+            tickets: Tickets::default(),
         };
-        Ok(Arc::new(Relay { cfg, ws, core: Mutex::new(core), shutdown }))
+        let uploads = Semaphore::new(l.blob_uploads_max.max(1));
+        Ok(Arc::new(Relay { cfg, ws, core: Mutex::new(core), blobs, uploads, shutdown }))
     }
 
     fn core(&self) -> MutexGuard<'_, Core> {
@@ -395,7 +536,7 @@ impl Relay {
                         core.broadcast_members();
                         self.register(&mut core, &me)
                     }
-                    Err(OpError::Refused { .. }) => {
+                    Err(OpError::Refused { .. } | OpError::Stale { .. }) => {
                         core.note_failure(addr, key, now);
                         debug!(%addr, "claim refused");
                         Err(DENIED_CLAIM)
@@ -442,13 +583,22 @@ impl Relay {
 
     fn handle_frame(&self, conn: u64, pubkey: &str, text: &str) {
         let Ok(parsed) = serde_json::from_str::<ClientFrame>(text) else {
-            self.core().send(conn, error_frame(None, "bad_request", "unknown or malformed frame"));
+            let id = malformed_ask_id(text);
+            self.core().send(conn, error_frame(id.as_deref(), "bad_request", "unknown or malformed frame"));
             return;
         };
         match parsed {
             ClientFrame::Ping => self.core().send(conn, frame(json!({"t": "pong"}))),
             ClientFrame::Publish { event } => self.publish(conn, pubkey, event),
+            ClientFrame::FileTouch { id, conv, path, on, by } => self.touch(conn, pubkey, id, conv, path, on, by),
             other => {
+                // What the answer repeats, so the client can tell which request it is for.
+                let id = other.ask_id().map(str::to_string);
+                if id.as_deref().is_some_and(|id| !valid_ident(id)) {
+                    self.core().send(conn, error_frame(None, "bad_request", "id must be a short string"));
+                    return;
+                }
+                let id = id.as_deref();
                 let mut core = self.core();
                 // Every `sync` counts, before any other work is done for it.
                 if matches!(other, ClientFrame::Sync { .. }) && !core.sync_rate.try_acquire(&conn, Instant::now()) {
@@ -457,15 +607,14 @@ impl Relay {
                 }
                 match self.operate(&mut core, pubkey, other) {
                     Ok(reply) => core.send(conn, reply),
-                    Err(OpError::Refused { code, message }) => {
-                        core.send(conn, error_frame(None, code, message));
-                        if code == "not_member" {
+                    Err(refusal) => {
+                        if let OpError::Internal(e) = &refusal {
+                            error!(error = %e, "request failed");
+                        }
+                        core.send(conn, refusal_frame(id, &refusal));
+                        if matches!(refusal, OpError::Refused { code: "not_member", .. }) {
                             core.kill(conn);
                         }
-                    }
-                    Err(OpError::Internal(e)) => {
-                        error!(error = %e, "request failed");
-                        core.send(conn, error_frame(None, "internal", "internal error"));
                     }
                 }
             }
@@ -530,6 +679,7 @@ impl Relay {
                 core.db.remove_member(&me.pubkey, &target)?;
                 info!(member = short(&target), by = short(&me.pubkey), "member removed");
                 core.drop_key(&target);
+                core.tickets.drop_member(&target);
                 core.broadcast_members();
                 Ok(ok_frame())
             }
@@ -568,7 +718,102 @@ impl Relay {
                 core.broadcast(&frame(json!({"t": "settings", "member_invites": member_invites})));
                 Ok(ok_frame())
             }
-            ClientFrame::Publish { .. } | ClientFrame::Ping => refuse("bad_request", "unexpected frame"),
+            ClientFrame::BlobTicket { id, op, conv, sha, size } => {
+                let op = match op.as_str() {
+                    "put" => Op::Put,
+                    "get" => Op::Get,
+                    _ => return refuse("bad_request", "op must be put or get"),
+                };
+                if !valid_ident(&conv) {
+                    return refuse("bad_request", "conv must be a short string");
+                }
+                if !is_sha256(&sha) {
+                    return refuse("bad_request", "sha must be 64 lower-case hex characters");
+                }
+                let l = &self.cfg.limits;
+                let instant = Instant::now();
+                let size = match op {
+                    Op::Put => {
+                        let Some(size) = size else {
+                            return refuse("bad_request", "size is required for put");
+                        };
+                        let known =
+                            core.db.check_upload(&me.pubkey, &conv, &sha, size, l.blob_max_bytes, l.blob_quota_bytes)?;
+                        // Nothing to send: the workspace has these bytes, whoever
+                        // uploaded them and for whichever channel. That is said
+                        // only for a hash together with its exact size.
+                        if known && self.blobs.has(&sha, size) {
+                            let reply = json!({"t": "blob.ticket", "op": op.as_str(), "sha": sha, "have": true});
+                            return Ok(frame(with_id(reply, id)));
+                        }
+                        size
+                    }
+                    Op::Get => core.db.check_download(&me.pubkey, &conv, &sha)?,
+                };
+                if core.tickets.held_by(&me.pubkey, instant) >= l.blob_tickets_per_member {
+                    return refuse("rate_limited", "too many unused tickets; use them or wait a minute");
+                }
+                if op == Op::Put && !core.upload_rate.try_acquire(&me.pubkey, instant) {
+                    return refuse("rate_limited", "uploading too fast");
+                }
+                let ticket = core.tickets.issue(&me.pubkey, op, &conv, &sha, size, l.blob_ticket_ttl, instant);
+                let expires = now.saturating_add(l.blob_ticket_ttl.as_secs());
+                let reply =
+                    json!({"t": "blob.ticket", "op": op.as_str(), "sha": sha, "ticket": ticket, "expires": expires});
+                Ok(frame(with_id(reply, id)))
+            }
+            ClientFrame::FilesList { id, conv, deleted } => {
+                let files = core.db.files(&me.pubkey, &conv, deleted)?;
+                Ok(frame(with_id(json!({"t": "files", "conv": conv, "files": files}), id)))
+            }
+            ClientFrame::FilesHistory { id, conv, path } => {
+                let versions = core.db.file_history(&me.pubkey, &conv, &path, HISTORY_LIMIT)?;
+                let reply = json!({"t": "files.history", "conv": conv, "path": path, "versions": versions});
+                Ok(frame(with_id(reply, id)))
+            }
+            ClientFrame::Publish { .. } | ClientFrame::Ping | ClientFrame::FileTouch { .. } => {
+                refuse("bad_request", "unexpected frame")
+            }
+        }
+    }
+
+    /// "Someone is working on this file": passed on to the other members who
+    /// can read the channel and kept nowhere. The sender hears back only when
+    /// it was refused, and then with the `id` it gave, if it gave one, so a
+    /// client can tell that refusal from one that matters to the person.
+    #[allow(clippy::too_many_arguments)]
+    fn touch(&self, conn: u64, pubkey: &str, id: Option<String>, conv: String, path: String, on: bool, by: Option<serde_json::Value>) {
+        let id = id.as_deref().filter(|id| valid_ident(id));
+        let mut core = self.core();
+        // Every touch counts, before any other work is done for it.
+        if !core.touch_rate.try_acquire(&conn, Instant::now()) {
+            return core.send(conn, error_frame(id, "rate_limited", "touching too fast"));
+        }
+        let Ok(by) = clean_file_author(by.as_ref()) else {
+            return core.send(conn, error_frame(id, "bad_request", "by needs an agent name and, if given, a #rrggbb color"));
+        };
+        if !valid_ident(&conv) || !valid_file_path(&path) {
+            return core.send(conn, error_frame(id, "bad_request", "conv and path must be a channel and a file path"));
+        }
+        let audience = match core.db.member(pubkey) {
+            Ok(Some(_)) => core.db.readers(pubkey, &conv),
+            Ok(None) => Err(OpError::Refused { code: "not_member", message: "not a member" }),
+            Err(e) => Err(OpError::Internal(e)),
+        };
+        match audience {
+            Ok(audience) => {
+                let touch = json!({"t": "file.touch", "conv": conv, "path": path, "on": on, "pubkey": pubkey, "by": by});
+                core.deliver_to_others(&audience, pubkey, &frame(touch));
+            }
+            Err(refusal) => {
+                if let OpError::Internal(e) = &refusal {
+                    error!(error = %e, "request failed");
+                }
+                core.send(conn, refusal_frame(id, &refusal));
+                if matches!(refusal, OpError::Refused { code: "not_member", .. }) {
+                    core.kill(conn);
+                }
+            }
         }
     }
 
@@ -625,17 +870,129 @@ impl Relay {
                     }
                 }
             }
-            Err(OpError::Refused { code, message }) => {
-                core.send(conn, error_frame(Some(&event.id), code, message));
-                if code == "not_member" {
+            Err(refusal) => {
+                if let OpError::Internal(e) = &refusal {
+                    error!(error = %e, kind = %event.kind, "could not store an event");
+                }
+                core.send(conn, refusal_frame(Some(&event.id), &refusal));
+                if matches!(refusal, OpError::Refused { code: "not_member", .. }) {
                     core.kill(conn);
                 }
             }
+        }
+    }
+
+    // ---- files over HTTP -------------------------------------------------------
+
+    /// `PUT /blob/<sha>`: takes the bytes a ticket was issued for.
+    async fn blob_put(&self, sha: &str, headers: &HeaderMap, body: Body) -> Response {
+        let Some(token) = bearer(headers) else {
+            return blob_unauthorized();
+        };
+        // Asked before the ticket is used up, so a client that forgot the
+        // header, or came at a busy moment, can try again with the same one.
+        let length = headers.get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+        let Some(length) = length else {
+            return blob_reply(StatusCode::LENGTH_REQUIRED, "Content-Length is required\n");
+        };
+        let Ok(_permit) = self.uploads.try_acquire() else {
+            let mut response = blob_reply(StatusCode::SERVICE_UNAVAILABLE, "too many uploads at once, try again\n");
+            response.headers_mut().insert(RETRY_AFTER, HeaderValue::from_static("1"));
+            return response;
+        };
+        let Some(ticket) = self.core().tickets.redeem(token, Op::Put, sha, Instant::now()) else {
+            return blob_unauthorized();
+        };
+        if length != ticket.size {
+            return blob_reply(StatusCode::PAYLOAD_TOO_LARGE, "the length is not the one the ticket was issued for\n");
+        }
+
+        let limit = self.cfg.limits.blob_upload_timeout;
+        let upload = match timeout(limit, self.blobs.receive(body, ticket.size, &ticket.sha)).await {
+            Ok(Ok(upload)) => upload,
+            Ok(Err(ReceiveError::TooLong)) => {
+                return blob_reply(StatusCode::PAYLOAD_TOO_LARGE, "more bytes than the ticket was issued for\n")
+            }
+            Ok(Err(ReceiveError::Incomplete)) => {
+                return blob_reply(StatusCode::BAD_REQUEST, "the upload ended before all of it arrived\n")
+            }
+            Ok(Err(ReceiveError::Mismatch)) => {
+                return blob_reply(StatusCode::UNPROCESSABLE_ENTITY, "the bytes do not have this SHA-256\n")
+            }
+            Ok(Err(ReceiveError::Io(e))) => {
+                error!(error = %e, "could not write an upload");
+                return blob_reply(StatusCode::INTERNAL_SERVER_ERROR, "internal error\n");
+            }
+            Err(_) => return blob_reply(StatusCode::REQUEST_TIMEOUT, "the upload took too long\n"),
+        };
+
+        // Counted against the quota and given its name in one step, so two
+        // uploads that each fit cannot both be stored when together they do not.
+        let mut core = self.core();
+        let quota = self.cfg.limits.blob_quota_bytes;
+        match core.db.store_blob(&ticket.sha, ticket.size, &ticket.pubkey, unix_now(), quota) {
+            Ok(added) => match self.blobs.keep(upload, &ticket.sha) {
+                Ok(()) => {
+                    info!(sha = short(&ticket.sha), size = ticket.size, by = short(&ticket.pubkey), "file stored");
+                    blob_reply(StatusCode::CREATED, "stored\n")
+                }
+                Err(e) => {
+                    error!(error = %e, "could not put an upload in place");
+                    if added {
+                        let _ = core.db.forget_blob(&ticket.sha);
+                    }
+                    blob_reply(StatusCode::INTERNAL_SERVER_ERROR, "internal error\n")
+                }
+            },
+            Err(OpError::Refused { code: "quota", .. }) => {
+                blob_reply(StatusCode::INSUFFICIENT_STORAGE, "the workspace's storage for files is full\n")
+            }
+            // The uploader was removed from the team while the bytes were on their way.
+            Err(OpError::Refused { .. } | OpError::Stale { .. }) => blob_unauthorized(),
             Err(OpError::Internal(e)) => {
-                error!(error = %e, kind = %event.kind, "could not store an event");
-                core.send(conn, error_frame(Some(&event.id), "internal", "internal error"));
+                error!(error = %e, "could not record an upload");
+                blob_reply(StatusCode::INTERNAL_SERVER_ERROR, "internal error\n")
             }
         }
+    }
+
+    /// `GET /blob/<sha>`: hands out the bytes a ticket was issued for.
+    async fn blob_get(&self, sha: &str, headers: &HeaderMap) -> Response {
+        let Some(token) = bearer(headers) else {
+            return blob_unauthorized();
+        };
+        let ticket = {
+            let mut core = self.core();
+            let Some(ticket) = core.tickets.redeem(token, Op::Get, sha, Instant::now()) else {
+                return blob_unauthorized();
+            };
+            // The ticket was issued up to a minute ago: its holder may have
+            // been taken out of the channel, or off the team, since.
+            match core.db.can_read(&ticket.pubkey, &ticket.conv) {
+                Ok(true) => ticket,
+                Ok(false) => return blob_unauthorized(),
+                Err(e) => {
+                    error!(error = %e, "could not check a download");
+                    return blob_reply(StatusCode::INTERNAL_SERVER_ERROR, "internal error\n");
+                }
+            }
+        };
+        // The name is the ticket's hash, which was checked to be hex when it was issued.
+        let opened = match tokio::fs::File::open(self.blobs.path(&ticket.sha)).await {
+            Ok(file) => file.metadata().await.map(|meta| (file, meta.len())),
+            Err(e) => Err(e),
+        };
+        let Ok((file, length)) = opened else {
+            return blob_reply(StatusCode::NOT_FOUND, "the relay does not have this file\n");
+        };
+        let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
+        let headers = response.headers_mut();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+        headers.insert(CONTENT_LENGTH, HeaderValue::from(length));
+        for (name, value) in BLOB_HEADERS {
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+        response
     }
 }
 
@@ -783,6 +1140,14 @@ async fn join_page(State(relay): State<Arc<Relay>>) -> Response {
     response
 }
 
+async fn blob_put(State(relay): State<Arc<Relay>>, Path(sha): Path<String>, headers: HeaderMap, body: Body) -> Response {
+    relay.blob_put(&sha, &headers, body).await
+}
+
+async fn blob_get(State(relay): State<Arc<Relay>>, Path(sha): Path<String>, headers: HeaderMap) -> Response {
+    relay.blob_get(&sha, &headers).await
+}
+
 async fn ws_handler(
     State(relay): State<Arc<Relay>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -797,7 +1162,8 @@ async fn ws_handler(
         .on_upgrade(move |socket| handle_socket(relay, socket, addr))
 }
 
-/// Serves `/ws` and `/healthz` on `listener` until `shutdown` is cancelled.
+/// Serves `/ws`, `/healthz`, `/join` and `/blob/<sha>` on `listener` until
+/// `shutdown` is cancelled.
 /// No CORS headers are added anywhere.
 pub async fn serve(cfg: Config, listener: TcpListener, shutdown: CancellationToken) -> Result<(), BoxError> {
     let relay = Relay::open(cfg, shutdown.clone())?;
@@ -816,6 +1182,7 @@ pub async fn serve(cfg: Config, listener: TcpListener, shutdown: CancellationTok
         .route("/healthz", get(|| async { "ok" }))
         .route("/join", get(join_page))
         .route("/ws", get(ws_handler))
+        .route("/blob/{sha}", get(blob_get).put(blob_put))
         .with_state(relay);
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown.cancelled_owned())

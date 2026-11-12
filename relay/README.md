@@ -1,8 +1,8 @@
 # cube-relay
 
 The team relay for Cube. A team runs one relay; every teammate's Cube connects to it. The relay
-stores and passes on signed events for exactly one workspace. It never runs agents and holds no
-secrets.
+stores and passes on signed events for exactly one workspace, and keeps the files of its shared
+channels. It never runs agents and holds no secrets.
 
 The contract between the app and the relay is [`docs/team-relay.md`](../docs/team-relay.md). This
 directory implements it.
@@ -21,8 +21,8 @@ cd relay
 cargo run --bin cube-relay
 ```
 
-With no configuration it listens on `127.0.0.1:8484`, keeps its data in `./cube-relay.db`, and
-expects clients to dial `127.0.0.1:8484` (not `localhost:8484`: the host a client signs for must
+With no configuration it listens on `127.0.0.1:8484`, keeps its data in `./cube-relay.db` and
+the files of shared channels in `./blobs/`, and expects clients to dial `127.0.0.1:8484` (not `localhost:8484`: the host a client signs for must
 equal `CUBE_RELAY_PUBLIC_HOST` exactly).
 
 ### The owner invite
@@ -87,6 +87,24 @@ $PEER --key ann.key $RELAY settings --member-invites false   # owner only
 
 A public key is printed as `you.pubkey` by `join` and `status`.
 
+The shared folder of a channel:
+
+```sh
+$PEER --key ann.key $RELAY put-file plans ./Plan.md             # ticket, upload, then file.put
+$PEER --key ann.key $RELAY put-file plans ./draft.md --path docs/Plan.md --agent Builder
+$PEER --key bea.key $RELAY files plans                          # what is there; --deleted for deleted paths too
+$PEER --key bea.key $RELAY get-file plans Plan.md ./copy.md     # ticket, download, hash check
+$PEER --key bea.key $RELAY put-file plans ./copy.md --path Plan.md --base <sha>   # refused (stale) if it changed since
+$PEER --key bea.key $RELAY history plans Plan.md                # every version, newest first
+$PEER --key bea.key $RELAY get-file plans Plan.md ./old.md --sha <sha>            # an earlier version
+$PEER --key ann.key $RELAY drop-file plans Plan.md              # publishes file.drop; --base as for put-file
+$PEER --key ann.key $RELAY touch plans Plan.md                  # "working on it"; --off when done
+$PEER --key ann.key $RELAY ticket plans get <sha>               # a raw ticket, to test a client's own transfer code
+```
+
+`--base ""` says "there is no file at this path yet". A refused `stale` prints the hash that is
+there as `current`. `listen` also prints the `file.touch` frames of others.
+
 Other options: `invite --role admin` (owner only), `listen --from <seq>` (replay history after
 `seq` first; `0` for everything), `--host` may be left out when it equals the host in `--relay`.
 `cube-peer` verifies every event it prints and drops, with a note on stderr, any that fail. Like
@@ -105,6 +123,8 @@ Everything is read from the environment. There are no secrets to configure.
 | `CUBE_RELAY_PUBLIC_HOST` | host (and port, if not 443) clients dial, e.g. `relay.example.com`; no scheme, no path; lower-cased | required unless bound to a loopback address, where it defaults to the bind address |
 | `CUBE_RELAY_TRUSTED_PROXY` | comma-separated IP addresses (no CIDR ranges) of proxies whose `X-Forwarded-For` is believed | none |
 | `CUBE_RELAY_APP_URL` | `https://` address where the Cube app can be had; shown on the invite page | none |
+| `CUBE_RELAY_BLOB_MAX_MB` | largest file a member may upload, in MiB (a whole number) | `10` |
+| `CUBE_RELAY_BLOB_QUOTA_MB` | what all stored files together may take, in MiB; not less than the value above | `1024` |
 | `RUST_LOG` | log filter for stderr, e.g. `debug` or `cube_relay=debug` | `info` |
 
 The relay refuses to start when `CUBE_RELAY_BIND` is not a loopback address and
@@ -121,10 +141,21 @@ the same for every visitor: the invite sits after the `#`, which a browser does 
 relay never sees it. The page's button hands the invite to the Cube app (`cube://<host>/#invite=…`).
 Behind a proxy, forward `/join` along with `/ws` and `/healthz` (the example `Caddyfile` does).
 
+Files travel as `PUT` and `GET /blob/<sha256>` on the same listener, each with a short-lived
+ticket in the `Authorization` header. Behind a proxy, forward `/blob/*` as well (the example
+`Caddyfile` does), let request bodies up to `CUBE_RELAY_BLOB_MAX_MB` through, and do not log
+or cache these requests' headers. The files are kept in the directory `blobs/` next to the
+database file (created with mode `0700`, files `0600`), one file per SHA-256, unencrypted.
+Nothing is ever removed from it: a replaced or deleted file keeps its earlier versions, and
+there is no garbage collection in this version. `CUBE_RELAY_BLOB_QUOTA_MB` is therefore how
+large that directory can become, and uploads are refused once it is reached. The relay does
+not look inside files.
+
 Commands: `cube-relay` (serve), `cube-relay owner-invite [--days N]`, `cube-relay --version`.
 
-The log records connections, membership changes and invite ids. It never contains invite tokens
-or message bodies.
+The log records connections, membership changes, invite ids and stored uploads (the first
+characters of the hash, the size). It never contains invite tokens, tickets, message bodies or
+file contents.
 
 ## Deploying with Docker and Caddy
 
@@ -142,8 +173,10 @@ docker compose exec relay cube-relay owner-invite
   Caddy has a fixed address (`172.30.84.2`) that is listed in `CUBE_RELAY_TRUSTED_PROXY`. If the
   subnet clashes with one of yours, change both places in `docker-compose.yml`.
 - The image runs as an unprivileged user (uid 10001) and keeps the database in the `/data`
-  volume (`relay-data`).
-- The `Caddyfile` forwards only `/ws` and `/healthz`.
+  volume (`relay-data`). The same volume now also holds the files (`/data/blobs`): size it for
+  the database plus `CUBE_RELAY_BLOB_QUOTA_MB` (1 GiB by default), with some room to spare
+  for uploads in flight.
+- The `Caddyfile` forwards only `/ws`, `/healthz`, `/join` and `/blob/*`.
 
 To run the image without compose:
 
@@ -169,7 +202,8 @@ check are set in the service's settings: Railway has deprecated its config file
    `RAILWAY_DOCKERFILE_PATH=Dockerfile.railway` does the same), and the health check path to
    `/healthz`.
 3. Attach a **volume** to the service with the mount path `/data`. Without it the database is
-   lost on every deploy.
+   lost on every deploy. The volume also holds the files of shared channels, up to
+   `CUBE_RELAY_BLOB_QUOTA_MB` (1 GiB by default): give it that much on top of the database.
 4. Under **Networking**, generate a public domain.
 5. Under **Variables**, set `CUBE_RELAY_PUBLIC_HOST` to `${{RAILWAY_PUBLIC_DOMAIN}}` and
    `CUBE_RELAY_NAME` to your team's name. The relay refuses to start without the first.
@@ -193,7 +227,12 @@ What is different from the Docker and Caddy setup:
 ## Backup
 
 All state is the SQLite file named by `CUBE_RELAY_DB` plus, while the relay runs, its `-wal` and
-`-shm` companions.
+`-shm` companions, and the directory `blobs/` next to it, which holds the files.
+
+- Copy `blobs/` along with the database, the database first. Files in it are only ever added
+  and never change, so it can be copied while the relay runs (ignore names starting with
+  `.tmp-`: uploads under way). A database restored without its `blobs/` still lists the files,
+  but fetching one is answered `404` until someone uploads the same bytes again.
 
 - Simplest: stop the relay (it then folds the write-ahead log back into the main file) and copy
   the file. With compose: `docker compose stop relay`, then
@@ -261,14 +300,38 @@ that talks to it should expect the following.
 - When an edit or delete rewrites earlier events, the relay also checkpoints the write-ahead log
   and runs with `secure_delete`, so the old text does not stay in the database files.
 
+**Files**
+
+- `sha` must be lower-case hex everywhere (in a ticket request, an event, the address). One
+  file must not have two names.
+- `..` is refused anywhere in a path, also inside a name (`a..b`).
+- An archived channel takes no new files: `file.put`, `file.drop` and a `put` ticket for it
+  are refused with `archived`. What it has can still be listed and fetched.
+- A ticket is used up by the first request that presents it in the `Authorization` header,
+  also one for the wrong hash or direction, or with the wrong length. The two exceptions are
+  the answers `411` and `503`, which are given before the ticket is looked at.
+- A `get` ticket is checked again when it is presented: if its holder was taken out of the
+  channel or off the team since, the answer is `401`.
+- A member can hold 256 unused tickets; asking for more is `rate_limited`.
+- Only an upload ticket that was issued counts toward the 120 per 10 minutes. An answer with
+  `have`, or a refusal, does not.
+- `have` is answered only when the bytes are really on disk. If the database knows a hash and
+  the file is missing, a ticket is issued and the upload puts it back.
+- The quota counts each distinct content once, however many paths or channels refer to it,
+  and is checked twice: when the ticket is asked for and when the upload is stored.
+- `file.touch` goes to the other members, not to other connections of the sender.
+
 **Error codes** in `{"t":"error",…}`: `bad_request`, `rate_limited`, `too_large`, `wrong_key`,
 `wrong_workspace`, `bad_id`, `bad_signature`, `bad_time`, `bad_body`, `unknown_kind`, `no_conv`,
 `archived`, `duplicate_msg`, `duplicate`, `not_found`, `wrong_conv`, `forbidden`, `gone`,
-`not_member`, `internal`. For a refused `publish` the frame carries the event's `id`.
+`not_member`, `internal`, and for files `too_big`, `quota`, `unchanged`, `stale`. For a refused
+`publish` the frame carries the event's `id`; for a refused `blob.ticket`, `files.list` or
+`files.history`, the `id` the request had; a `stale` frame also carries `current`.
 
-Not limited by this version: the number of open connections (per address, per key or in total)
-and the rate of requests other than `publish`. Put a connection limit on the proxy if the relay
-faces the open internet.
+Not limited by this version: the number of open connections (per address, per key or in total),
+the rate of requests other than `publish`, `sync`, `file.touch` and upload tickets, and the
+number of files in a channel. Put a connection limit on the proxy if the relay faces the open
+internet.
 
 ## Tests
 
@@ -278,6 +341,7 @@ cargo test
 ```
 
 `proto` has unit tests for every function, including tampering. `server` has unit tests for
-configuration, storage rules, rate limiting and proxy handling, and `server/tests/relay.rs` starts
-a relay on an ephemeral port for each test and talks to it over real WebSocket connections; it
-also runs the `cube-relay` and `cube-peer` binaries.
+configuration, storage rules, migrations, tickets, rate limiting and proxy handling, and
+`server/tests/relay.rs` starts a relay on an ephemeral port for each test and talks to it over
+real WebSocket connections and HTTP requests; it also runs the `cube-relay` and `cube-peer`
+binaries.

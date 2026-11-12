@@ -5,9 +5,13 @@ import { AGENTS, ROUTER, agentById } from "@/agents/types";
 import { maskSecrets } from "@/lib/secrets";
 import { useCube, type Conv, type Msg } from "@/state/store";
 import { notify } from "@/lib/notify";
+import { readFileEvent } from "./drive";
+import { fileEvent, forgetDrive, hasFiles, startDrive, touched } from "./driveSync";
 import { applyEvent, dmId, dmPeer, inviteLink, normalizeInvite, postBody, shareable, taggedIn, type TeamEvent, type TeamMember } from "./events";
 
 export * from "./events";
+export * from "./drive";
+export { acceptHeld, dismissNote, fileHistory, hasFiles, restoreDeleted, restoreVersion, setConvFiles, syncConv } from "./driveSync";
 
 const store = () => useCube.getState();
 
@@ -31,7 +35,7 @@ async function adopt(sharedId: string, name: string, isPrivate = false): Promise
   const id = `${peer ? "pm" : "team"}-${sharedId.replace(/[^a-z0-9]/gi, "").slice(peer ? 2 : 0, peer ? 14 : 10).toLowerCase()}`;
   const taken = new Set(s.convs.map((c) => c.name));
   const shown = peer ? peer.name : taken.has(name) ? `${name} (team)` : name;
-  const conv: Conv = { id, kind: "channel", name: shown, members: AGENTS.map((a) => a.id), dir: "", createdAt: Date.now(), shared: { id: sharedId, since: 0, ...(isPrivate ? { private: true } : {}) }, ...(peer ? { person: { pubkey: peer.pubkey } } : {}) };
+  const conv: Conv = { id, kind: "channel", name: shown, members: AGENTS.map((a) => a.id), dir: "", createdAt: Date.now(), shared: { id: sharedId, since: 0, ...(isPrivate ? { private: true } : {}), files: true }, ...(peer ? { person: { pubkey: peer.pubkey } } : {}) };
   s.addConv(conv);
   if (inTauri) store().setConvDir(id, await ensureSpace(id).catch(() => ""));
 }
@@ -54,7 +58,7 @@ export async function openDm(pubkey: string): Promise<void> {
   const id = `pm-${sharedId.replace(/[^a-z0-9]/gi, "").slice(2, 14).toLowerCase()}`;
   // Their side may have reached us in the meantime.
   if (!convOf(sharedId)) {
-    s.addConv({ id, kind: "channel", name: peer.name, members: AGENTS.map((a) => a.id), dir: "", createdAt: Date.now(), shared: { id: sharedId, since: Date.now(), private: true }, person: { pubkey } });
+    s.addConv({ id, kind: "channel", name: peer.name, members: AGENTS.map((a) => a.id), dir: "", createdAt: Date.now(), shared: { id: sharedId, since: Date.now(), private: true, files: true }, person: { pubkey } });
     if (inTauri) store().setConvDir(id, await ensureSpace(id).catch(() => ""));
   }
   const now = convOf(sharedId);
@@ -65,6 +69,13 @@ export async function openDm(pubkey: string): Promise<void> {
 function take(e: TeamEvent): void {
   const s = store();
   const me = s.team.info?.pubkey ?? "";
+  // A file was put in a channel's folder, or taken out of it. Our own count: that is how an upload is known to have landed.
+  const file = readFileEvent(e);
+  if (file) {
+    fileEvent(file.sharedId, file.remote);
+    if (e.seq > s.team.head) s.setTeam({ head: e.seq });
+    return;
+  }
   const change = applyEvent(e, { me, members: s.team.members, convOf: (id) => convOf(id)?.id, msgOf: (id) => s.messages.find((m) => m.id === id) });
   if (e.seq > s.team.head) s.setTeam({ head: e.seq });
   if (!change) return;
@@ -177,9 +188,10 @@ export function refreshMembers(sharedId: string): void {
 }
 
 /** Connects to the team this Cube has joined, if any, and keeps shared channels in step from then on. */
-export async function startTeam(outside?: (convId: string, msgId: string) => void): Promise<void> {
+export async function startTeam(outside?: (convId: string, msgId: string) => void, rescan?: (convId: string) => Promise<void> | void): Promise<void> {
   onOutside = outside;
   if (!inTauri) return;
+  startDrive(rescan);
   await teamListen((v) => {
     const s = store();
     switch (v.t) {
@@ -243,6 +255,9 @@ export async function startTeam(outside?: (convId: string, msgId: string) => voi
         if (v.more && next !== undefined) void teamAsk({ t: "sync", after: next, ...(conv ? { conv } : {}) }).catch(() => undefined);
         break;
       }
+      case "file.touch":
+        touched(v);
+        break;
       case "invite":
         if (s.team.info) s.setTeamLive({ invite: inviteLink(s.team.info.host, String(v.token), Boolean(s.team.features?.includes("join-page"))), inviteFor: typeof v.conv === "string" ? v.conv : askedFor, problem: "" });
         break;
@@ -285,6 +300,7 @@ export async function leaveTeam(): Promise<void> {
   const s = store();
   for (const c of sharedConvs()) s.setConvShared(c.id, undefined);
   published.clear();
+  forgetDrive();
   s.setTeam({ info: undefined, me: undefined, members: [], head: 0, agents: [], pulls: {}, features: [], avatars: {}, avatarSent: undefined });
   for (const sub of s.subagents) if (sub.shared) s.putSubagent({ ...sub, shared: false });
   s.setTeamLive({ connected: false, problem: "", invite: undefined, inviteFor: undefined, convMembers: {} });
@@ -292,7 +308,8 @@ export async function leaveTeam(): Promise<void> {
 
 /**
  * Starts sharing a channel: what is said in it from now on goes to the whole team, or, when it is
- * private, only to the people invited into it. Which of the two is decided here and stays.
+ * private, only to the people invited into it. Which of the two is decided here and stays. Its
+ * folder becomes the channel's shared folder, when the relay keeps files.
  */
 export async function shareConv(convId: string, isPrivate = false): Promise<void> {
   const conv = store().convs.find((c) => c.id === convId);
@@ -300,7 +317,7 @@ export async function shareConv(convId: string, isPrivate = false): Promise<void
   if (isPrivate && !hasChannels()) throw new Error("This team's relay is an earlier version that cannot keep a channel private. Update the relay first.");
   const id = crypto.randomUUID();
   await teamPublish("conv.put", JSON.stringify({ conv: id, name: conv.name, ...(isPrivate ? { private: true } : {}) }));
-  store().setConvShared(convId, { id, since: Date.now(), ...(isPrivate ? { private: true } : {}) });
+  store().setConvShared(convId, { id, since: Date.now(), ...(isPrivate ? { private: true } : {}), ...(hasFiles() ? { files: true } : {}) });
   refreshMembers(id);
 }
 

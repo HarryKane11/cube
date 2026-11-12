@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
@@ -14,14 +15,21 @@ use cube_proto::{
     parse_invite_link, pubkey_hex, sign_event, sign_text, verify_event, Event, SigningKey,
 };
 use cube_relay::config::{is_local_host, normalize_host};
+use cube_relay::db::sha256_hex;
 use futures_util::{SinkExt, StreamExt};
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper_util::rt::TokioIo;
 use rand::RngCore;
 use serde_json::{json, Value};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long sending or fetching one file may take.
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(150);
 
 #[derive(Parser)]
 #[command(name = "cube-peer", about = "Act as a teammate against a cube-relay (developer tool)")]
@@ -75,7 +83,69 @@ enum Command {
         #[arg(long, default_value = "")]
         instructions: String,
     },
-    /// Print every event, member-list and settings frame as one JSON line until killed.
+    /// Put a local file in a channel's folder: upload it unless the relay
+    /// already has it, then publish file.put.
+    PutFile {
+        conv: String,
+        file: PathBuf,
+        /// The path in the channel; defaults to the file's name.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+        /// Say that an agent of this name made the file.
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+        /// The sha this copy started from, or "" for "there is no file there";
+        /// the relay refuses (stale) if the channel has something else.
+        #[arg(long, value_name = "SHA")]
+        base: Option<String>,
+    },
+    /// Fetch a file from a channel's folder and check its hash.
+    GetFile {
+        conv: String,
+        path: String,
+        to: PathBuf,
+        /// Fetch this earlier version instead of the current one.
+        #[arg(long, value_name = "SHA")]
+        sha: Option<String>,
+    },
+    /// Print the files in a channel's folder.
+    Files {
+        conv: String,
+        /// Also list the paths whose file was deleted.
+        #[arg(long)]
+        deleted: bool,
+    },
+    /// Delete the file at a path for everyone (publishes file.drop).
+    DropFile {
+        conv: String,
+        path: String,
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+        /// As for put-file.
+        #[arg(long, value_name = "SHA")]
+        base: Option<String>,
+    },
+    /// Print the versions of the file at a path, newest first.
+    History { conv: String, path: String },
+    /// Ask for a ticket to the relay's file store and print it, for testing a client's own
+    /// transfer code against a relay. `op` is put or get; a put needs --size.
+    Ticket {
+        conv: String,
+        op: String,
+        sha: String,
+        #[arg(long, value_name = "BYTES")]
+        size: Option<u64>,
+    },
+    /// Tell the others in a channel that you are working on a file (or, with --off, stopped).
+    Touch {
+        conv: String,
+        path: String,
+        #[arg(long)]
+        off: bool,
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+    },
+    /// Print every event, member-list, settings and file.touch frame as one JSON line until killed.
     Listen {
         /// First replay history after this sequence number (0 for everything).
         #[arg(long, value_name = "SEQ")]
@@ -107,15 +177,17 @@ enum Command {
     },
 }
 
-/// A failure, printed as `{"ok":false,"code":…,"message":…}`.
+/// A failure, printed as `{"ok":false,"code":…,"message":…}`; a `stale`
+/// one also says what the channel has (`"current"`).
 struct Fail {
     code: String,
     message: String,
+    current: Option<String>,
 }
 
 impl Fail {
     fn new(code: &str, message: impl Into<String>) -> Fail {
-        Fail { code: code.to_string(), message: message.into() }
+        Fail { code: code.to_string(), message: message.into(), current: None }
     }
 }
 
@@ -185,6 +257,11 @@ struct Client {
 /// Checks a relay URL the way the app does: `wss://` anywhere, `ws://` only
 /// for a local relay. Returns the `host[:port]` it names.
 fn authority_of(url: &str) -> Res<String> {
+    endpoint_of(url).map(|(_, host)| host)
+}
+
+/// Whether a relay URL is TLS, and the `host[:port]` it names.
+fn endpoint_of(url: &str) -> Res<(bool, String)> {
     let (tls, rest) = if let Some(rest) = url.strip_prefix("wss://") {
         (true, rest)
     } else if let Some(rest) = url.strip_prefix("ws://") {
@@ -197,7 +274,7 @@ fn authority_of(url: &str) -> Res<String> {
     if !tls && !is_local_host(&host) {
         return Err(Fail::new("usage", "ws:// is only allowed for localhost, 127.0.0.1 and [::1]"));
     }
-    Ok(host)
+    Ok((tls, host))
 }
 
 impl Client {
@@ -321,6 +398,24 @@ impl Client {
         }
     }
 
+    /// Sends a request under a fresh `id` and waits for the answer that
+    /// repeats it, whatever else arrives in between.
+    async fn ask(&mut self, mut request: Value) -> Res<Value> {
+        let id = format!("ask-{}", random_id());
+        request["id"] = json!(id);
+        self.send(request).await?;
+        loop {
+            let reply = self.recv().await?;
+            if reply.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+                continue;
+            }
+            return match reply.get("t").and_then(Value::as_str) {
+                Some("error") => Err(denied(&reply)),
+                _ => Ok(reply),
+            };
+        }
+    }
+
     /// Sends a request and waits for a frame of type `want` (or an error).
     async fn request(&mut self, request: Value, want: &str) -> Res<Value> {
         self.send(request).await?;
@@ -344,10 +439,87 @@ fn text_field(value: &Value, name: &str) -> Res<String> {
 }
 
 fn denied(frame: &Value) -> Fail {
-    Fail::new(
+    let mut fail = Fail::new(
         frame.get("code").and_then(Value::as_str).unwrap_or("error"),
         frame.get("message").and_then(Value::as_str).unwrap_or(""),
-    )
+    );
+    fail.current = frame.get("current").and_then(Value::as_str).map(str::to_string);
+    fail
+}
+
+// ---- files over HTTP ---------------------------------------------------------------
+
+async fn exchange<S>(stream: S, request: hyper::Request<Full<Bytes>>) -> Result<(u16, Vec<u8>), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.map_err(|e| e.to_string())?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let response = sender.send_request(request).await.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    let body = response.into_body().collect().await.map_err(|e| e.to_string())?;
+    Ok((status, body.to_bytes().to_vec()))
+}
+
+/// One `/blob/<sha>` request to the relay named by `--relay`, with the
+/// ticket as its only credential. Returns the status and the body.
+async fn blob_request(url: &str, method: &str, sha: &str, ticket: &str, body: Option<Vec<u8>>) -> Res<(u16, Vec<u8>)> {
+    let (tls, host) = endpoint_of(url)?;
+    let transfer = async {
+        let body = body.unwrap_or_default();
+        let request = hyper::Request::builder()
+            .method(method)
+            .uri(format!("/blob/{sha}"))
+            .header("host", host.as_str())
+            .header("authorization", format!("Bearer {ticket}"))
+            .header("content-length", body.len())
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|e| e.to_string())?;
+        // `host` may leave the port out; then it is the scheme's.
+        let has_port = !host.ends_with(']') && host.rsplit_once(':').is_some_and(|(_, port)| port.parse::<u16>().is_ok());
+        let address = if has_port { host.clone() } else { format!("{host}:{}", if tls { 443 } else { 80 }) };
+        let tcp = TcpStream::connect(&address).await.map_err(|e| e.to_string())?;
+        if !tls {
+            return exchange(tcp, request).await;
+        }
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        let name = if has_port { host.rsplit_once(':').map_or(host.as_str(), |(name, _)| name) } else { host.as_str() };
+        let name = rustls::pki_types::ServerName::try_from(name.trim_matches(['[', ']']).to_string())
+            .map_err(|e| e.to_string())?;
+        let stream = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await.map_err(|e| e.to_string())?;
+        exchange(stream, request).await
+    };
+    match tokio::time::timeout(TRANSFER_TIMEOUT, transfer).await {
+        Ok(Ok(done)) => Ok(done),
+        Ok(Err(e)) => Err(Fail::new("connect", format!("{method} /blob failed: {e}"))),
+        Err(_) => Err(Fail::new("timeout", "the transfer took too long")),
+    }
+}
+
+/// What a `/blob` request that was not answered with `want` is reported as.
+fn blob_status(status: u16, want: u16) -> Res<()> {
+    if status == want {
+        return Ok(());
+    }
+    let code = match status {
+        401 => "ticket",
+        404 => "not_found",
+        413 => "too_big",
+        422 => "hash_mismatch",
+        507 => "quota",
+        _ => "http",
+    };
+    Err(Fail::new(code, format!("the relay answered {status}")))
+}
+
+/// The `by` of a file event or a touch, when `--agent` was given.
+fn by_agent(agent: &Option<String>) -> Option<Value> {
+    agent.as_ref().map(|agent| json!({"agent": agent}))
 }
 
 // ---- commands --------------------------------------------------------------------
@@ -435,7 +607,7 @@ async fn listen(cli: &Cli, from: Option<u64>) -> Res<Value> {
     while let Some(frame) = client.recv_forever().await? {
         match frame.get("t").and_then(Value::as_str) {
             Some("event") => print_event(&frame, &ws),
-            Some("members" | "settings") => print_line(&frame),
+            Some("members" | "settings" | "file.touch") => print_line(&frame),
             Some("events") => {
                 for item in frame.get("events").and_then(Value::as_array).into_iter().flatten() {
                     print_event(&as_event_frame(item), &ws);
@@ -509,6 +681,120 @@ async fn run(cli: Cli) -> Res<Value> {
             let agent = json!({"id": id, "name": name, "role": "", "brief": brief, "instructions": instructions, "palette": ["#1FA864", "#9BE15D", "#12B5CB"]});
             published(&cli, "agent.put", json!({"agent": agent}), json!({"agent": id})).await
         }
+        Command::PutFile { conv, file, path, agent, base } => {
+            let url = cli.relay.as_deref().ok_or_else(|| Fail::new("usage", "--relay <ws url> is required"))?;
+            let bytes = std::fs::read(file)
+                .map_err(|e| Fail::new("file", format!("cannot read {}: {e}", file.display())))?;
+            let path = match path {
+                Some(path) => path.clone(),
+                None => file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+                    .ok_or_else(|| Fail::new("usage", "--path is required: the file has no usable name"))?,
+            };
+            let (sha, size) = (sha256_hex(&bytes), bytes.len());
+            let (mut client, key, _) = connect(&cli).await?;
+            let ticket = client
+                .ask(json!({"t": "blob.ticket", "op": "put", "conv": conv, "sha": sha, "size": size}))
+                .await?;
+            // The relay may have these bytes already: then there is nothing to send.
+            let uploaded = ticket.get("have").and_then(Value::as_bool) != Some(true);
+            if uploaded {
+                let (status, _) = blob_request(url, "PUT", &sha, &text_field(&ticket, "ticket")?, Some(bytes)).await?;
+                blob_status(status, 201)?;
+            }
+            let mut body = json!({"conv": conv, "path": path, "sha": sha, "size": size});
+            if let Some(base) = base {
+                body["base"] = json!(base);
+            }
+            if let Some(by) = by_agent(agent) {
+                body["by"] = by;
+            }
+            let (event, seq) = client.publish(&key, "file.put", body).await?;
+            Ok(json!({
+                "ok": true, "id": event.id, "seq": seq, "kind": "file.put",
+                "conv": conv, "path": path, "sha": sha, "size": size, "uploaded": uploaded,
+            }))
+        }
+        Command::GetFile { conv, path, to, sha } => {
+            let url = cli.relay.as_deref().ok_or_else(|| Fail::new("usage", "--relay <ws url> is required"))?;
+            let (mut client, _, _) = connect(&cli).await?;
+            let sha = match sha {
+                Some(sha) => sha.clone(),
+                None => {
+                    let listed = client.ask(json!({"t": "files.list", "conv": conv})).await?;
+                    let files = listed.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
+                    // The relay keeps one file per path whatever its spelling, so any spelling finds it.
+                    let found = files
+                        .iter()
+                        .find(|file| {
+                            file.get("path").and_then(Value::as_str).is_some_and(|p| p.to_lowercase() == path.to_lowercase())
+                        })
+                        .ok_or_else(|| Fail::new("not_found", "the channel has no file at this path"))?;
+                    text_field(found, "sha")?
+                }
+            };
+            let ticket = client.ask(json!({"t": "blob.ticket", "op": "get", "conv": conv, "sha": sha})).await?;
+            let (status, bytes) = blob_request(url, "GET", &sha, &text_field(&ticket, "ticket")?, None).await?;
+            blob_status(status, 200)?;
+            // The relay is not trusted with the content: what arrived must be what was named.
+            if sha256_hex(&bytes) != sha {
+                return Err(Fail::new("hash_mismatch", "what the relay sent does not have the file's SHA-256"));
+            }
+            std::fs::write(to, &bytes).map_err(|e| Fail::new("file", format!("cannot write {}: {e}", to.display())))?;
+            Ok(json!({"ok": true, "conv": conv, "path": path, "sha": sha, "size": bytes.len(), "to": to.display().to_string()}))
+        }
+        Command::Files { conv, deleted } => {
+            let (mut client, _, _) = connect(&cli).await?;
+            let mut request = json!({"t": "files.list", "conv": conv});
+            if *deleted {
+                request["deleted"] = json!(true);
+            }
+            let reply = client.ask(request).await?;
+            Ok(json!({"ok": true, "conv": reply.get("conv"), "files": reply.get("files")}))
+        }
+        Command::DropFile { conv, path, agent, base } => {
+            let mut body = json!({"conv": conv, "path": path});
+            if let Some(base) = base {
+                body["base"] = json!(base);
+            }
+            if let Some(by) = by_agent(agent) {
+                body["by"] = by;
+            }
+            published(&cli, "file.drop", body, json!({"conv": conv, "path": path})).await
+        }
+        Command::History { conv, path } => {
+            let (mut client, _, _) = connect(&cli).await?;
+            let reply = client.ask(json!({"t": "files.history", "conv": conv, "path": path})).await?;
+            Ok(json!({
+                "ok": true,
+                "conv": reply.get("conv"),
+                "path": reply.get("path"),
+                "versions": reply.get("versions"),
+            }))
+        }
+        Command::Ticket { conv, op, sha, size } => {
+            let (mut client, _, _) = connect(&cli).await?;
+            let mut request = json!({"t": "blob.ticket", "op": op, "conv": conv, "sha": sha});
+            if let Some(size) = size {
+                request["size"] = json!(size);
+            }
+            let reply = client.ask(request).await?;
+            Ok(json!({"ok": true, "op": op, "sha": sha, "ticket": reply.get("ticket"), "have": reply.get("have"), "expires": reply.get("expires")}))
+        }
+        Command::Touch { conv, path, off, agent } => {
+            let (mut client, _, _) = connect(&cli).await?;
+            let mut touch = json!({"t": "file.touch", "conv": conv, "path": path, "on": !off});
+            if let Some(by) = by_agent(agent) {
+                touch["by"] = by;
+            }
+            client.send(touch).await?;
+            // A touch that is passed on is not answered. Requests are answered
+            // in order, so a `pong` with no error before it means it went through.
+            client.request(json!({"t": "ping"}), "pong").await?;
+            Ok(json!({"ok": true, "conv": conv, "path": path, "on": !off}))
+        }
         Command::Listen { from } => listen(&cli, *from).await,
         Command::Sync { after, conv } => {
             let (mut client, _, _) = connect(&cli).await?;
@@ -567,7 +853,11 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(fail) => {
-            print_line(&json!({"ok": false, "code": fail.code, "message": fail.message}));
+            let mut out = json!({"ok": false, "code": fail.code, "message": fail.message});
+            if let Some(current) = fail.current {
+                out["current"] = json!(current);
+            }
+            print_line(&out);
             ExitCode::FAILURE
         }
     }

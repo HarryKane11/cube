@@ -5,8 +5,11 @@
 # client sent, which is what CUBE_RELAY_TRUSTED_PROXY relies on. Do not add
 # `trusted_proxies` here unless another proxy really sits in front of Caddy.
 # Access logging is off by default; leave it off.
+#
+# Only the named paths reach the relay. /blob/* carries the files of shared
+# channels; Caddy puts no limit on the size of a request body, the relay does.
 {$RELAY_DOMAIN} {
-	@relay path /ws /healthz /join
+	@relay path /ws /healthz /join /blob/*
 	handle @relay {
 		reverse_proxy relay:8484
 	}

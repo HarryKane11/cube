@@ -11,8 +11,15 @@ use cube_proto::{format_invite_link, parse_invite_link};
 /// A well-formed token used only to run a host through the invite-link parser.
 const PROBE_TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-/// The fixed numbers from `docs/team-relay.md`. They are not configurable from
-/// the environment; tests shorten some of them.
+const MIB: u64 = 1024 * 1024;
+const DEFAULT_BLOB_MAX_MB: u64 = 10;
+const DEFAULT_BLOB_QUOTA_MB: u64 = 1024;
+/// The largest size either file limit may be set to, in MiB (1 TiB).
+const MAX_BLOB_MB: u64 = 1024 * 1024;
+
+/// The numbers from `docs/team-relay.md`. Only the two file sizes
+/// (`blob_max_bytes`, `blob_quota_bytes`) are read from the environment; the
+/// rest are fixed, and tests shorten some of them.
 #[derive(Clone, Debug)]
 pub struct Limits {
     /// A connection must finish `auth` or `claim` within this time.
@@ -34,12 +41,30 @@ pub struct Limits {
     pub max_frame_bytes: usize,
     /// Largest event body.
     pub max_body_bytes: usize,
+    /// `file.touch` requests allowed per connection within `touch_window`.
+    pub touch_max: usize,
+    pub touch_window: Duration,
     /// Events per `events` frame.
     pub sync_page: usize,
     /// An `events` frame is cut short once its bodies add up to this many bytes.
     pub sync_page_bytes: usize,
     /// How far `created_at` may be from relay time, in seconds.
     pub created_at_skew_secs: u64,
+    /// Largest file a member may upload (`CUBE_RELAY_BLOB_MAX_MB`).
+    pub blob_max_bytes: u64,
+    /// What all stored files together may take (`CUBE_RELAY_BLOB_QUOTA_MB`).
+    pub blob_quota_bytes: u64,
+    /// Upload tickets issued per member within `blob_put_window`.
+    pub blob_put_max: usize,
+    pub blob_put_window: Duration,
+    /// How long a ticket can be used after it was issued.
+    pub blob_ticket_ttl: Duration,
+    /// Unused tickets one member may hold at a time.
+    pub blob_tickets_per_member: usize,
+    /// An upload must be complete within this time, from its first byte to its last.
+    pub blob_upload_timeout: Duration,
+    /// Uploads received at the same time; further ones are told to come back.
+    pub blob_uploads_max: usize,
 }
 
 impl Default for Limits {
@@ -56,9 +81,19 @@ impl Default for Limits {
             queue_frames: 1000,
             max_frame_bytes: 256 * 1024,
             max_body_bytes: 64 * 1024,
+            touch_max: 60,
+            touch_window: Duration::from_secs(60),
             sync_page: 200,
             sync_page_bytes: 1024 * 1024,
             created_at_skew_secs: 600,
+            blob_max_bytes: DEFAULT_BLOB_MAX_MB * MIB,
+            blob_quota_bytes: DEFAULT_BLOB_QUOTA_MB * MIB,
+            blob_put_max: 120,
+            blob_put_window: Duration::from_secs(600),
+            blob_ticket_ttl: Duration::from_secs(60),
+            blob_tickets_per_member: 256,
+            blob_upload_timeout: Duration::from_secs(120),
+            blob_uploads_max: 8,
         }
     }
 }
@@ -110,7 +145,26 @@ pub fn is_local_host(host: &str) -> bool {
     parse_invite_link(&format_invite_link(host, false, PROBE_TOKEN)).is_ok()
 }
 
+/// A size in MiB from the environment: a whole number from 1 to `MAX_BLOB_MB`.
+fn mib(name: &str, value: Option<String>, default: u64) -> Result<u64, ConfigError> {
+    let Some(text) = value else {
+        return Ok(default * MIB);
+    };
+    match text.parse::<u64>() {
+        Ok(n) if (1..=MAX_BLOB_MB).contains(&n) => Ok(n * MIB),
+        _ => err(format!("{name} must be a whole number of MiB from 1 to {MAX_BLOB_MB}, got `{text}`")),
+    }
+}
+
 impl Config {
+    /// Where uploaded files are kept: `blobs/` next to the database file.
+    pub fn blob_dir(&self) -> PathBuf {
+        match self.db_path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.join("blobs"),
+            _ => PathBuf::from("blobs"),
+        }
+    }
+
     pub fn from_env() -> Result<Config, ConfigError> {
         Config::from_lookup(|name| std::env::var(name).ok())
     }
@@ -173,6 +227,14 @@ impl Config {
             None => None,
         };
 
+        let mut limits = Limits::default();
+        limits.blob_max_bytes = mib("CUBE_RELAY_BLOB_MAX_MB", get("CUBE_RELAY_BLOB_MAX_MB"), DEFAULT_BLOB_MAX_MB)?;
+        limits.blob_quota_bytes =
+            mib("CUBE_RELAY_BLOB_QUOTA_MB", get("CUBE_RELAY_BLOB_QUOTA_MB"), DEFAULT_BLOB_QUOTA_MB)?;
+        if limits.blob_quota_bytes < limits.blob_max_bytes {
+            return err("CUBE_RELAY_BLOB_QUOTA_MB must be at least CUBE_RELAY_BLOB_MAX_MB");
+        }
+
         Ok(Config {
             bind,
             db_path,
@@ -180,7 +242,7 @@ impl Config {
             public_host,
             app_url,
             trusted_proxies,
-            limits: Limits::default(),
+            limits,
         })
     }
 }
@@ -237,6 +299,37 @@ mod tests {
         assert!(cfg(&[("CUBE_RELAY_TRUSTED_PROXY", "10.0.0.0/8")]).is_err());
         assert!(cfg(&[("CUBE_RELAY_TRUSTED_PROXY", "caddy")]).is_err());
         assert!(cfg(&[("CUBE_RELAY_NAME", "a\nb")]).is_err());
+    }
+
+    #[test]
+    fn file_limits() {
+        let c = cfg(&[]).unwrap();
+        assert_eq!(c.limits.blob_max_bytes, 10 * 1024 * 1024);
+        assert_eq!(c.limits.blob_quota_bytes, 1024 * 1024 * 1024);
+        assert_eq!(c.blob_dir(), PathBuf::from("./blobs"));
+
+        let c = cfg(&[
+            ("CUBE_RELAY_DB", "/data/cube-relay.db"),
+            ("CUBE_RELAY_BLOB_MAX_MB", "25"),
+            ("CUBE_RELAY_BLOB_QUOTA_MB", "200"),
+        ])
+        .unwrap();
+        assert_eq!(c.limits.blob_max_bytes, 25 * 1024 * 1024);
+        assert_eq!(c.limits.blob_quota_bytes, 200 * 1024 * 1024);
+        assert_eq!(c.blob_dir(), PathBuf::from("/data/blobs"));
+        assert_eq!(cfg(&[("CUBE_RELAY_DB", "relay.db")]).unwrap().blob_dir(), PathBuf::from("blobs"));
+
+        for (name, value) in [
+            ("CUBE_RELAY_BLOB_MAX_MB", "0"),
+            ("CUBE_RELAY_BLOB_MAX_MB", "1.5"),
+            ("CUBE_RELAY_BLOB_MAX_MB", "ten"),
+            ("CUBE_RELAY_BLOB_QUOTA_MB", "-1"),
+            ("CUBE_RELAY_BLOB_QUOTA_MB", "99999999999"),
+            // One file may not be allowed to be larger than everything together.
+            ("CUBE_RELAY_BLOB_QUOTA_MB", "5"),
+        ] {
+            assert!(cfg(&[(name, value)]).is_err(), "{name}={value}");
+        }
     }
 
     #[test]

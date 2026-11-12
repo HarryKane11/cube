@@ -3,6 +3,7 @@
 //! The relay stores and passes on signed events for exactly one workspace. It
 //! holds no secrets and runs no agents.
 
+mod blob;
 pub mod config;
 pub mod db;
 mod join;

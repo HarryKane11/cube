@@ -189,6 +189,32 @@ export const teamPublish = (kind: string, body: string) => invoke<number>("team_
 /** Asks the relay for history, an invite or a member change. The answer arrives through `teamListen`. */
 export const teamAsk = (frame: Record<string, unknown>) => invoke<void>("team_ask", { frame });
 /** Hears everything the relay says, after the Rust side has checked it. */
+/** Asks the relay something whose answer comes straight back: what is in a channel's shared folder, or a file's history. */
+export const teamRequest = (frame: Record<string, unknown>) => invoke<Record<string, unknown>>("team_request", { frame });
+
+/** A file in a conversation folder as the shared-folder scan sees it. `skip` says why it is never shared. */
+export interface DriveFile {
+  rel: string;
+  size: number;
+  mtime: number;
+  sha?: string | null;
+  skip?: "name" | "secret" | "big" | null;
+}
+type By = { agent: string; color?: string };
+/** Why a shared-folder step failed: the relay's short code (`stale`, `quota`…) or `local`, and what to tell the person. */
+export interface DriveFail {
+  code: string;
+  message: string;
+}
+export const driveScan = (dir: string) => invoke<DriveFile[]>("drive_scan", { dir });
+/** Shares the file at `rel` as the channel's `path`. Rejects with a `DriveFail`. */
+export const drivePut = (conv: string, dir: string, rel: string, path: string, base: string, by?: By) => invoke<{ sha: string; size: number; seq: number }>("drive_put", { conv, dir, rel, path, base, by });
+export const driveDrop = (conv: string, dir: string, rel: string, path: string, base: string, by?: By) => invoke<number>("drive_drop", { conv, dir, rel, path, base, by });
+/** Brings a version down to `rel`, unless the file there is not what `expect` says (then `changed`). */
+export const driveGet = (conv: string, dir: string, rel: string, sha: string, size: number, expect?: string) => invoke<{ state: "written" | "changed"; mtime: number }>("drive_get", { conv, dir, rel, sha, size, expect });
+export const driveMerge = (conv: string, dir: string, rel: string, base: string | undefined, sha: string, size: number, copy: string) => invoke<{ outcome: "same" | "merged" | "copied"; copy?: string | null }>("drive_merge", { conv, dir, rel, base, sha, size, copy });
+export const driveTrash = (dir: string, rel: string, expect: string) => invoke<boolean>("drive_trash", { dir, rel, expect });
+
 export const teamListen = (on: (v: Record<string, unknown> & { t: string }) => void) => listen<Record<string, unknown> & { t: string }>("team-ev", (e) => on(e.payload));
 
 /** What one agent program has on this computer, with the file each thing lives in. */

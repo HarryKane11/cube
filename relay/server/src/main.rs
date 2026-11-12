@@ -20,6 +20,8 @@ Configuration (environment):
   CUBE_RELAY_NAME           workspace name shown to members           [Team]
   CUBE_RELAY_PUBLIC_HOST    host[:port] clients dial; required unless bound to loopback
   CUBE_RELAY_TRUSTED_PROXY  comma-separated proxy addresses whose X-Forwarded-For is believed
+  CUBE_RELAY_BLOB_MAX_MB    largest file a member may upload, in MiB  [10]
+  CUBE_RELAY_BLOB_QUOTA_MB  what all files together may take, in MiB  [1024]
   RUST_LOG                  log filter                                [info]
 ";
 
