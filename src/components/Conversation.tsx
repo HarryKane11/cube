@@ -2,8 +2,9 @@ import { useMemo, useState, useEffect } from "react";
 import { setSeparate, stopAgent, undoRestore } from "@/agents/orchestrator";
 import { agentById, type AgentDef } from "@/agents/types";
 import { EngineLabel } from "@/components/bits";
+import { ChannelPeople } from "@/components/ChannelPeople";
 import { Composer } from "@/components/Composer";
-import { BranchIcon, CloseIcon, HashIcon, PinIcon, StageIcon, PeopleIcon } from "@/components/icons";
+import { BranchIcon, CloseIcon, HashIcon, LockIcon, PinIcon, StageIcon, PeopleIcon } from "@/components/icons";
 import { authorName } from "@/agents/types";
 import { MessageItem, ThreadSummary } from "@/components/MessageItem";
 import { ChatContainerContent, ChatContainerRoot } from "@/components/ui/chat-container";
@@ -21,13 +22,21 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
   const dm = conv.kind === "dm" ? members[0] : undefined;
   const separate = useCube((s) => Boolean(s.trees[conv.id]));
   const [problem, setProblem] = useState("");
+  const [people, setPeople] = useState(false);
+  const inTeam = useCube((s) => Boolean(s.team.info));
   return (
     <header className="flex min-h-[62px] items-center gap-2.5 border-b px-5 py-2.5" data-tauri-drag-region>
-      {dm ? <Cube color={dm.color} status={live[dm.id]?.status ?? "idle"} size={40} /> : <HashIcon className="text-muted-foreground" width={22} height={22} />}
+      {dm ? <Cube color={dm.color} status={live[dm.id]?.status ?? "idle"} size={40} /> : conv.person ? (
+        <span className="flex size-9 flex-none items-center justify-center rounded-full bg-secondary text-[15px] font-semibold" aria-hidden="true" data-notranslate>{conv.name.trim().charAt(0).toUpperCase() || "?"}</span>
+      ) : <HashIcon className="text-muted-foreground" width={22} height={22} />}
       <div className="min-w-0 flex-1">
         <h1 className="flex items-center gap-2 truncate font-heading text-[19px] font-bold leading-tight tracking-[-0.02em]">
           <span className="truncate">{conv.name}</span>
-          {conv.shared && <span className="flex h-5 flex-none items-center gap-1 rounded-full bg-primary/15 px-2 text-[11px] font-semibold tracking-normal text-primary" title="What is said here goes to everyone in your team. Cubes here ask before they run anything."><PeopleIcon width={12} height={12} /> Shared with team</span>}
+          {conv.shared && !conv.person && (
+            <button type="button" className="flex h-5 flex-none items-center gap-1 rounded-full bg-primary/15 px-2 text-[11px] font-semibold tracking-normal text-primary" title={conv.shared.private ? "Only the people invited into this channel see it. Cubes here ask before they run anything." : "What is said here goes to everyone in your team. Cubes here ask before they run anything."} onClick={() => setPeople(true)}>
+              {conv.shared.private ? <><LockIcon width={12} height={12} /> Private</> : <><PeopleIcon width={12} height={12} /> Shared with team</>}
+            </button>
+          )}
         </h1>
         {dm ? (
           <p className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -35,10 +44,16 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
           </p>
         ) : (
           <p className="text-xs text-muted-foreground">
-            {members.map((m) => m.name).join(", ")} and you
+            {conv.person ? "Direct message. Your cubes answer here only when you name one with @." : <>{members.map((m) => m.name).join(", ")} and you</>}
           </p>
         )}
       </div>
+      {!dm && inTeam && !conv.person && (
+        <button type="button" className="flex h-8 flex-none items-center gap-1.5 rounded-full bg-secondary px-3 text-[13px] font-semibold" title="Share this channel and invite people into it" onClick={() => setPeople(true)}>
+          <PeopleIcon width={15} height={15} /> Invite
+        </button>
+      )}
+      {!dm && <ChannelPeople conv={conv} open={people} onOpenChange={setPeople} />}
       {!dm && members.length > 1 && (
         <button
           type="button"
@@ -139,7 +154,7 @@ function Empty({ conv }: { conv: Conv }) {
   return (
     <div className="m-auto flex max-w-[320px] flex-col items-center gap-1.5 px-6 text-center">
       {dm && <Cube color={dm.color} status="idle" size={96} />}
-      <h2 className="font-heading text-lg font-bold tracking-[-0.02em]">{dm ? `Just you and ${dm.name}` : `This is the start of #${conv.name}`}</h2>
+      <h2 className="font-heading text-lg font-bold tracking-[-0.02em]">{dm || conv.person ? `Just you and ${dm ? dm.name : conv.name}` : `This is the start of #${conv.name}`}</h2>
       <p className="text-muted-foreground">
         {dm
           ? `Anything you write here goes straight to ${dm.name}. What it makes shows up on the Stage.`

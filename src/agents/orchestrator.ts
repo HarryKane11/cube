@@ -5,7 +5,7 @@ import { hasBuiltinSession, startBuiltin } from "./builtin";
 import { startRemote } from "./remote";
 import type { SubAgent } from "./subagents";
 import { knowledgeTick, listKnowledge } from "../knowledge";
-import { fenced, startTeam } from "../team";
+import { fenced, removeFromConv, startTeam, unshareConv } from "../team";
 import { checkScopes, startSlack } from "../slack";
 import { customAdapter, parseManifest, type Manifest } from "./custom";
 import { startMock } from "./mock";
@@ -15,7 +15,7 @@ import { dayKey, due } from "../lib/schedule";
 import { clashing } from "../lib/stats";
 import { allowedBy, describeAsk, isEditTool, planOf, questionsOf, ruleFor } from "./permissions";
 import { customAgents, drawPicture, keyList, pictureListen, slackPost, slackUpload } from "./runner";
-import { checkpointRestore, checkpointSave, detectEngines, endInput, ensureSpace, inTauri, listFiles, readText, startProcess, stopProcess, windowsList, writeProcess } from "./runner";
+import { checkpointRestore, checkpointSave, detectEngines, endInput, ensureSpace, inTauri, listFiles, readText, startProcess, stopProcess, trashPath, windowsList, writeProcess } from "./runner";
 import { branchOf, closeTree, ensureRepo, prepareTree } from "./trees";
 import { ORCH, ROLE_DEFAULTS, ROUTER, isLeadRole } from "./types";
 import { AGENTS, ENGINE_CAN, agentById, authorName, pickEngine, route, trustFor, type AgentDef, type AgentKind, type Ev, type Mode, type RunOpts, type Trust } from "./types";
@@ -507,6 +507,39 @@ export async function addSubagent(sub: SubAgent): Promise<void> {
   store().putSubagent(sub);
   const dm = store().convs.find((c) => c.id === `dm-${sub.id}`);
   if (dm && !dm.dir) await prepare(dm);
+}
+
+/** Channels that cannot be deleted: the one the Home screen sends to, and the one Slack requests land in. */
+export const KEPT_CHANNELS = ["general", "slack"];
+
+/**
+ * Deletes a channel: the cubes at work in it are stopped, its messages leave Cube, and its
+ * folder goes to the Trash, from where the files can be taken back. A channel shared with the
+ * team is left, not deleted for the others: they keep what was said in it.
+ * Returns what went wrong with the folder, or null.
+ */
+export async function deleteChannel(convId: string): Promise<string | null> {
+  const conv = convById(convId);
+  if (!conv || conv.kind !== "channel" || KEPT_CHANNELS.includes(conv.id)) return "This channel cannot be deleted.";
+  for (const run of [...active.values()].filter((r) => r.convId === convId)) {
+    run.stoppedByPerson = true;
+    run.stop();
+    run.finish();
+  }
+  const me = store().team.info?.pubkey;
+  // A private channel has a list of who is in it: this person comes off it. Best effort; the relay may be away.
+  if (conv.shared?.private && me) await removeFromConv(convId, me).catch(() => undefined);
+  else if (conv.shared) unshareConv(convId);
+  store().removeConv(convId);
+  if (!inTauri || !conv.dir) return null;
+  const at = conv.dir.replace(/\/+$/, "");
+  const cut = at.lastIndexOf("/");
+  try {
+    await trashPath(at.slice(0, cut), at.slice(cut + 1));
+    return null;
+  } catch (e) {
+    return `The channel is gone from Cube, but its folder could not be moved to the Trash: ${String(e)}`;
+  }
 }
 
 /** Stops one agent's work in a conversation and leaves the others going. */
@@ -1011,6 +1044,8 @@ export function send(convId: string, raw: string, parentId?: string, opts: SendO
     const inConv = (ids: string[]) => ids.filter((id) => conv.members.includes(id));
     targets = inConv(mentions(lead));
     if (!targets.length) targets = inConv(mentions(text));
+    // What is written to a person is for the person. A cube comes in only when it is named.
+    if (conv.person && !targets.length) return;
     // Stepping into a plan goes to the one running it, not to every teammate that was stopped.
     if (!targets.length && interrupted.length) targets = hasOrch && (planned || interrupted.includes(ORCH)) ? [ORCH] : interrupted.filter((id) => id !== ROUTER);
     // A side question with no name goes to whoever is at work.

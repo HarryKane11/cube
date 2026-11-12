@@ -245,7 +245,7 @@ export function Composer({ conv, parentId }: { conv: Conv; parentId?: string }) 
       ? "Step in: say what should change"
       : conv.kind === "dm"
         ? `Message ${conv.name}`
-        : `Message #${conv.name}. Type @ to hand work to a cube`;
+        : conv.person ? `Message ${conv.name}. Type @ to bring in a cube` : `Message #${conv.name}. Type @ to hand work to a cube`;
 
   return (
     <div className="relative flex flex-col gap-1 px-3 pb-3 pt-1" ref={box} onPaste={onPaste} onDrop={onDrop} onDragOver={(e) => { if (e.dataTransfer.types.includes("Files")) e.preventDefault(); }}>

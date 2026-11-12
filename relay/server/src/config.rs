@@ -25,6 +25,9 @@ pub struct Limits {
     /// Publish attempts allowed per key within `publish_window`.
     pub publish_max: usize,
     pub publish_window: Duration,
+    /// `sync` requests allowed per connection within `sync_window`.
+    pub sync_max: usize,
+    pub sync_window: Duration,
     /// Frames that may wait for a slow client before it is disconnected.
     pub queue_frames: usize,
     /// Largest incoming WebSocket frame.
@@ -48,6 +51,8 @@ impl Default for Limits {
             auth_fail_window: Duration::from_secs(60),
             publish_max: 30,
             publish_window: Duration::from_secs(10),
+            sync_max: 60,
+            sync_window: Duration::from_secs(10),
             queue_frames: 1000,
             max_frame_bytes: 256 * 1024,
             max_body_bytes: 64 * 1024,

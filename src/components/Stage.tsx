@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { lazy, Suspense, useEffect, useMemo, useState, useCallback } from "react";
 import { rescan } from "@/agents/orchestrator";
 import { inTauri, pageUrl, quickLook, readText, windowShot, windowsList, type Win } from "@/agents/runner";
@@ -15,6 +15,7 @@ import { CodeBlock, CodeBlockCode } from "@/components/ui/code-block";
 import { Cube, CubeStill } from "@/cube/Cube";
 import { hasPreview, isEditable, isLooked, isTextKind, KIND_LABEL } from "@/lib/files";
 import { changesSince } from "@/lib/tree";
+import { RightClick } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { BROWSER, SCREEN, useActiveConv, useBusy, useCube, type Artifact, type Follow, type Shot, type ViewMode } from "@/state/store";
 
@@ -343,7 +344,17 @@ export function Stage() {
               const on = rel === BROWSER ? onBrowser : rel === SCREEN ? onScreen : rel === current?.rel;
               const unsaved = Boolean(a && dirty[a.path]);
               return (
-                <div key={rel} className={cn("group/tab flex flex-none items-center rounded-xl text-[13px] font-medium", on ? "bg-foreground text-background" : "bg-muted text-muted-foreground hover:text-foreground")}>
+                <RightClick
+                  key={rel}
+                  items={[
+                    { label: "Close", onSelect: () => closeTab(conv.id, rel) },
+                    strip.length > 1 && { label: "Close the others", onSelect: () => strip.filter((r) => r !== rel).forEach((r) => closeTab(conv.id, r)) },
+                    strip.length > 1 && { label: "Close all", onSelect: () => strip.forEach((r) => closeTab(conv.id, r)) },
+                    a && inTauri && "-",
+                    a && inTauri && { label: "Show in Finder", onSelect: () => void revealItemInDir(a.path).catch(() => undefined) },
+                  ]}
+                >
+                <div className={cn("group/tab flex flex-none items-center rounded-xl text-[13px] font-medium", on ? "bg-foreground text-background" : "bg-muted text-muted-foreground hover:text-foreground")}>
                   <button type="button" role="tab" aria-selected={on} title={a ? rel : label} className="flex items-center gap-1.5 py-1 pl-1.5 pr-1" onClick={() => select(conv.id, rel, true)}>
                     {a ? <Glyph kind={a.kind} name={a.rel} /> : <span className="glyph glyph-screen" aria-hidden="true"><i /></span>}
                     {a ? a.rel.split("/").pop() : label}
@@ -353,6 +364,7 @@ export function Stage() {
                     <CloseIcon width={11} height={11} className={cn(unsaved && "hidden group-hover/tab:block")} />
                   </button>
                 </div>
+                </RightClick>
               );
             })}
           </div>

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { rescan } from "@/agents/orchestrator";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { createFile, inTauri, renamePath, searchText, trashPath } from "@/agents/runner";
+import { RightClick } from "@/components/ui/context-menu";
 import { Glyph } from "@/components/Glyph";
 import { ChevronIcon, PencilIcon, PlusIcon, TrashIcon } from "@/components/icons";
 import { isEditable, kindOf } from "@/lib/files";
@@ -78,10 +80,22 @@ function Row({ node, depth, ops }: { node: TreeNode; depth: number; ops: Ops }) 
   const act = "hidden size-5 flex-none items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground group-hover/row:flex group-focus-within/row:flex";
   return (
     <li className={cn(row, node.rel === ops.current && "bg-accent font-semibold")} style={pad}>
+      <RightClick
+        items={[
+          { label: "Open on the Stage", onSelect: () => ops.pick(node.rel) },
+          inTauri && a && { label: "Open in its own app", onSelect: () => void openPath(a.path).catch(() => undefined) },
+          inTauri && a && { label: "Show in Finder", onSelect: () => void revealItemInDir(a.path).catch(() => undefined) },
+          a && { label: "Copy path", onSelect: () => void navigator.clipboard?.writeText(a.path).catch(() => undefined) },
+          "-",
+          inTauri && { label: "Rename or move…", onSelect: () => ops.setBusy({ rel: node.rel, what: "rename" }) },
+          inTauri && { label: "Move to Trash…", danger: true, onSelect: () => ops.setBusy({ rel: node.rel, what: "trash" }) },
+        ]}
+      >
       <button type="button" className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left" aria-current={node.rel === ops.current} onClick={() => ops.pick(node.rel)}>
         <Glyph kind={a?.kind ?? kindOf(node.rel)} name={node.rel} small />
         <span className="min-w-0 flex-1 truncate">{node.name}</span>
       </button>
+      </RightClick>
       {inTauri && (
         <>
           <button type="button" className={act} aria-label={`Rename ${node.rel}`} title="Rename or move" onClick={() => ops.setBusy({ rel: node.rel, what: "rename" })}><PencilIcon width={12} height={12} /></button>

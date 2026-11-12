@@ -50,7 +50,19 @@ enum Command {
     /// Post a message to a channel.
     Post { conv: String, text: String },
     /// Create or rename a channel (publishes conv.put).
-    Conv { conv: String, name: String },
+    Conv {
+        conv: String,
+        name: String,
+        /// Create it as a private channel: only its members can read it.
+        #[arg(long)]
+        private: bool,
+    },
+    /// Put a member (public key, hex) in a channel (publishes conv.add).
+    Add { conv: String, pubkey: String },
+    /// Take a member out of a channel, or leave it yourself (publishes conv.remove).
+    Remove { conv: String, pubkey: String },
+    /// Print who is in a channel.
+    Members { conv: String },
     /// Replace the text of a message you posted.
     Edit { conv: String, msg_id: String, text: String },
     /// Delete a message.
@@ -63,16 +75,35 @@ enum Command {
         #[arg(long, default_value = "")]
         instructions: String,
     },
-    /// Print every event and member-list frame as one JSON line until killed.
+    /// Print every event, member-list and settings frame as one JSON line until killed.
     Listen {
         /// First replay history after this sequence number (0 for everything).
         #[arg(long, value_name = "SEQ")]
         from: Option<u64>,
     },
+    /// Print what the relay serves after a sequence number, one event per
+    /// line, then a line with `next`; with --conv, one channel only.
+    Sync {
+        #[arg(long, value_name = "SEQ", default_value_t = 0)]
+        after: u64,
+        #[arg(long, value_name = "ID")]
+        conv: Option<String>,
+    },
     /// Make an invite and print its link.
     Invite {
         #[arg(long, default_value = "member")]
         role: String,
+        /// Put whoever claims it in this channel.
+        #[arg(long, value_name = "ID")]
+        conv: Option<String>,
+    },
+    /// Print what the relay says on connecting: you, members, head, features, settings.
+    Status,
+    /// Change a workspace setting (owner only).
+    Settings {
+        /// Whether members may invite people to channels they are in.
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        member_invites: bool,
     },
 }
 
@@ -233,6 +264,28 @@ impl Client {
         }
     }
 
+    /// Asks for pages after `after` until the relay says there are no more,
+    /// printing each event. Returns how many it printed and the last `next`.
+    async fn sync_all(&mut self, mut after: u64, conv: Option<&str>) -> Res<(u64, u64)> {
+        let ws = self.ws.clone();
+        let mut printed = 0;
+        loop {
+            let mut request = json!({"t": "sync", "after": after});
+            if let Some(conv) = conv {
+                request["conv"] = json!(conv);
+            }
+            let page = self.request(request, "events").await?;
+            for item in page.get("events").and_then(Value::as_array).into_iter().flatten() {
+                print_event(&as_event_frame(item), &ws);
+                printed += 1;
+            }
+            after = next_after(&page).unwrap_or(after);
+            if page.get("more").and_then(Value::as_bool) != Some(true) {
+                return Ok((printed, after));
+            }
+        }
+    }
+
     async fn auth(&mut self, key: &SigningKey, host: &str) -> Res<Value> {
         let sig = sign_text(key, &auth_message(host, &self.ws, &self.nonce));
         self.send(json!({"t": "auth", "pubkey": pubkey_hex(key), "host": host, "sig": sig})).await?;
@@ -299,7 +352,8 @@ fn denied(frame: &Value) -> Fail {
 
 // ---- commands --------------------------------------------------------------------
 
-async fn connect(cli: &Cli) -> Res<(Client, SigningKey, String)> {
+/// Connects and authenticates; also returns the relay's `ready` frame.
+async fn connect_ready(cli: &Cli) -> Res<(Client, SigningKey, String, Value)> {
     let key_path = cli.key.as_deref().ok_or_else(|| Fail::new("usage", "--key <file> is required"))?;
     let url = cli.relay.as_deref().ok_or_else(|| Fail::new("usage", "--relay <ws url> is required"))?;
     let host = match cli.host.as_deref() {
@@ -308,8 +362,42 @@ async fn connect(cli: &Cli) -> Res<(Client, SigningKey, String)> {
     };
     let key = load_key(key_path)?;
     let mut client = Client::open(url).await?;
-    client.auth(&key, &host).await?;
+    let ready = client.auth(&key, &host).await?;
+    Ok((client, key, host, ready))
+}
+
+async fn connect(cli: &Cli) -> Res<(Client, SigningKey, String)> {
+    let (client, key, host, _) = connect_ready(cli).await?;
     Ok((client, key, host))
+}
+
+/// What `join` and `status` print of a `ready` frame.
+fn ready_fields(ready: &Value) -> Value {
+    json!({
+        "you": ready.get("you"),
+        "members": ready.get("members"),
+        "head": ready.get("head"),
+        "features": ready.get("features"),
+        "settings": ready.get("settings"),
+    })
+}
+
+/// An item of an `events` frame, shaped like a live `event` frame.
+fn as_event_frame(item: &Value) -> Value {
+    let mut item = item.clone();
+    if let Some(obj) = item.as_object_mut() {
+        obj.insert("t".to_string(), json!("event"));
+    }
+    item
+}
+
+/// Where to continue after an `events` frame: its `next`, or the last seq in
+/// it for a relay that does not send one.
+fn next_after(page: &Value) -> Option<u64> {
+    page.get("next").and_then(Value::as_u64).or_else(|| {
+        let events = page.get("events").and_then(Value::as_array)?;
+        events.last()?.get("seq").and_then(Value::as_u64)
+    })
 }
 
 async fn published(cli: &Cli, kind: &str, body: Value, extra: Value) -> Res<Value> {
@@ -347,19 +435,13 @@ async fn listen(cli: &Cli, from: Option<u64>) -> Res<Value> {
     while let Some(frame) = client.recv_forever().await? {
         match frame.get("t").and_then(Value::as_str) {
             Some("event") => print_event(&frame, &ws),
-            Some("members") => print_line(&frame),
+            Some("members" | "settings") => print_line(&frame),
             Some("events") => {
-                let mut last = None;
                 for item in frame.get("events").and_then(Value::as_array).into_iter().flatten() {
-                    let mut item = item.clone();
-                    if let Some(obj) = item.as_object_mut() {
-                        obj.insert("t".to_string(), json!("event"));
-                    }
-                    last = item.get("seq").and_then(Value::as_u64).or(last);
-                    print_event(&item, &ws);
+                    print_event(&as_event_frame(item), &ws);
                 }
                 if frame.get("more").and_then(Value::as_bool) == Some(true) {
-                    if let Some(after) = last {
+                    if let Some(after) = next_after(&frame) {
                         client.send(json!({"t": "sync", "after": after})).await?;
                     }
                 }
@@ -378,18 +460,37 @@ async fn run(cli: Cli) -> Res<Value> {
             let key = if key_path.exists() { load_key(key_path)? } else { create_key(key_path)? };
             let mut client = Client::open(&link.url).await?;
             let ready = client.claim(&key, &link.host, &link.token, name).await?;
+            let mut out = json!({"ok": true, "relay": link.url, "host": link.host, "ws": client.ws});
+            if let (Some(out), Some(fields)) = (out.as_object_mut(), ready_fields(&ready).as_object()) {
+                out.extend(fields.clone());
+            }
+            Ok(out)
+        }
+        Command::Conv { conv, name, private } => {
+            let mut body = json!({"conv": conv, "name": name});
+            if *private {
+                // Only said when asked for: a rename must not claim a visibility.
+                body["private"] = json!(true);
+            }
+            published(&cli, "conv.put", body, json!({"conv": conv})).await
+        }
+        Command::Add { conv, pubkey } => {
+            let body = json!({"conv": conv, "member": pubkey});
+            published(&cli, "conv.add", body, json!({"conv": conv, "member": pubkey})).await
+        }
+        Command::Remove { conv, pubkey } => {
+            let body = json!({"conv": conv, "member": pubkey});
+            published(&cli, "conv.remove", body, json!({"conv": conv, "member": pubkey})).await
+        }
+        Command::Members { conv } => {
+            let (mut client, _, _) = connect(&cli).await?;
+            let reply = client.request(json!({"t": "conv.members", "conv": conv}), "conv.members").await?;
             Ok(json!({
                 "ok": true,
-                "relay": link.url,
-                "host": link.host,
-                "ws": client.ws,
-                "you": ready.get("you"),
-                "members": ready.get("members"),
-                "head": ready.get("head"),
+                "conv": reply.get("conv"),
+                "private": reply.get("private"),
+                "members": reply.get("members"),
             }))
-        }
-        Command::Conv { conv, name } => {
-            published(&cli, "conv.put", json!({"conv": conv, "name": name}), json!({"conv": conv})).await
         }
         Command::Post { conv, text } => {
             let msg_id = random_id();
@@ -409,20 +510,48 @@ async fn run(cli: Cli) -> Res<Value> {
             published(&cli, "agent.put", json!({"agent": agent}), json!({"agent": id})).await
         }
         Command::Listen { from } => listen(&cli, *from).await,
-        Command::Invite { role } => {
+        Command::Sync { after, conv } => {
+            let (mut client, _, _) = connect(&cli).await?;
+            let (events, next) = client.sync_all(*after, conv.as_deref()).await?;
+            let mut out = json!({"ok": true, "events": events, "next": next});
+            if let Some(conv) = conv {
+                out["conv"] = json!(conv);
+            }
+            Ok(out)
+        }
+        Command::Invite { role, conv } => {
             if role != "member" && role != "admin" {
                 return Err(Fail::new("usage", "--role must be member or admin"));
             }
             let (mut client, _, host) = connect(&cli).await?;
-            let reply = client.request(json!({"t": "invite.create", "role": role}), "invite").await?;
+            let mut request = json!({"t": "invite.create", "role": role});
+            if let Some(conv) = conv {
+                request["conv"] = json!(conv);
+            }
+            let reply = client.request(request, "invite").await?;
             let token = text_field(&reply, "token")?;
             let tls = cli.relay.as_deref().is_some_and(|url| url.starts_with("wss://"));
-            Ok(json!({
+            let mut out = json!({
                 "ok": true,
                 "link": format_invite_link(&host, tls, &token),
                 "role": role,
                 "expires_at": reply.get("expires_at"),
-            }))
+            });
+            if let Some(conv) = conv {
+                out["conv"] = json!(conv);
+            }
+            Ok(out)
+        }
+        Command::Status => {
+            let (_, _, _, ready) = connect_ready(&cli).await?;
+            let mut out = ready_fields(&ready);
+            out["ok"] = json!(true);
+            Ok(out)
+        }
+        Command::Settings { member_invites } => {
+            let (mut client, _, _) = connect(&cli).await?;
+            client.request(json!({"t": "settings.set", "member_invites": member_invites}), "ok").await?;
+            Ok(json!({"ok": true, "member_invites": member_invites}))
         }
     }
 }

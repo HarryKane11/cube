@@ -14,6 +14,7 @@ import { CopyIcon, PencilIcon, PinIcon, RewindIcon, ThreadIcon, TrashIcon } from
 import { kindOf } from "@/lib/files";
 import { Steps, StepsContent, StepsItem, StepsTrigger } from "@/components/ui/steps";
 import { HelperCard } from "@/components/HelperCard";
+import { RightClick } from "@/components/ui/context-menu";
 import { Rolling } from "@/components/Rolling";
 import { Cube, CubeStill } from "@/cube/Cube";
 import { cn } from "@/lib/utils";
@@ -358,9 +359,23 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
     if (next && next !== msg.text) patchMsg(msg.id, { text: next, edited: true });
     setEditing(undefined);
   };
+  const openThread = useCube((s) => s.openThread);
+  const deleteMsg = useCube((s) => s.deleteMsg);
+  // The same things the bar above a message offers, where the hand already is.
+  const menu = [
+    !inPanel && { label: "Reply in thread", onSelect: () => openThread(msg.parentId ?? msg.id) },
+    // What is selected, if anything is; otherwise the whole message.
+    { label: "Copy", onSelect: () => void navigator.clipboard?.writeText(window.getSelection()?.toString() || splitNotes(msg.text).text).catch(() => undefined) },
+    !msg.streaming && { label: msg.pinned ? "Unpin" : "Pin to this conversation", onSelect: () => patchMsg(msg.id, { pinned: !msg.pinned }) },
+    mine && !msg.streaming && { label: "Edit message", onSelect: () => setEditing(msg.text) },
+    mine && Boolean(msg.checkpoint) && { label: "Put files back to before this message", onSelect: () => setRestoring("ask") },
+    "-" as const,
+    !msg.streaming && { label: "Delete message", danger: true, onSelect: () => deleteMsg(msg.id) },
+  ];
   const waitingCalls = msg.decided ? decisions.filter((d) => d.msgId === msg.id && d.state === "new").length : 0;
 
   return (
+      <RightClick items={menu}>
       <div data-mid={msg.id} className={cn("group relative flex items-start gap-1.5 rounded-xl px-4 py-0.5", fresh && "msg-in", mine && "mine flex-row-reverse", compact && !mine && "pl-12")}>
         {msg.from && (
           <span className="flex flex-none items-center justify-center rounded-xl bg-secondary font-semibold text-foreground" style={{ width: size, height: size, fontSize: size * 0.4 }} aria-hidden="true" data-notranslate>
@@ -498,6 +513,7 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
         </div>
         <Toolbar msg={msg} mine={mine} canThread={!inPanel} onRestore={mine && msg.checkpoint ? () => setRestoring("ask") : undefined} onEdit={mine && !msg.streaming ? () => setEditing(msg.text) : undefined} />
       </div>
+      </RightClick>
   );
 }
 

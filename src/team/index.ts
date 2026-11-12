@@ -4,7 +4,7 @@ import { adopt as adoptOffer, offer, type SharedAgent } from "@/agents/subagents
 import { AGENTS, ROUTER, agentById } from "@/agents/types";
 import { maskSecrets } from "@/lib/secrets";
 import { useCube, type Conv, type Msg } from "@/state/store";
-import { applyEvent, inviteLink, postBody, shareable, type TeamEvent, type TeamMember } from "./events";
+import { applyEvent, dmId, dmPeer, inviteLink, postBody, shareable, type TeamEvent, type TeamMember } from "./events";
 
 export * from "./events";
 
@@ -23,13 +23,42 @@ const sharedConvs = () => store().convs.filter((c) => c.shared);
 const convOf = (sharedId: string) => store().convs.find((c) => c.shared?.id === sharedId);
 
 /** Makes the local side of a channel a teammate shared: a channel of its own, with this person's cubes in it. */
-async function adopt(sharedId: string, name: string): Promise<void> {
+async function adopt(sharedId: string, name: string, isPrivate = false): Promise<void> {
   if (convOf(sharedId)) return;
-  const id = `team-${sharedId.replace(/[^a-z0-9]/gi, "").slice(0, 10).toLowerCase()}`;
-  const taken = new Set(store().convs.map((c) => c.name));
-  const conv: Conv = { id, kind: "channel", name: taken.has(name) ? `${name} (team)` : name, members: AGENTS.map((a) => a.id), dir: "", createdAt: Date.now(), shared: { id: sharedId, since: 0 } };
-  store().addConv(conv);
+  const s = store();
+  const peer = isPrivate ? dmPeer(sharedId, s.team.info?.pubkey ?? "", s.team.members) : undefined;
+  const id = `${peer ? "pm" : "team"}-${sharedId.replace(/[^a-z0-9]/gi, "").slice(peer ? 2 : 0, peer ? 14 : 10).toLowerCase()}`;
+  const taken = new Set(s.convs.map((c) => c.name));
+  const shown = peer ? peer.name : taken.has(name) ? `${name} (team)` : name;
+  const conv: Conv = { id, kind: "channel", name: shown, members: AGENTS.map((a) => a.id), dir: "", createdAt: Date.now(), shared: { id: sharedId, since: 0, ...(isPrivate ? { private: true } : {}) }, ...(peer ? { person: { pubkey: peer.pubkey } } : {}) };
+  s.addConv(conv);
   if (inTauri) store().setConvDir(id, await ensureSpace(id).catch(() => ""));
+}
+
+/**
+ * Opens the direct conversation with a teammate, making it if there is none yet: a private
+ * channel with the two of them in it, under an id both sides arrive at.
+ */
+export async function openDm(pubkey: string): Promise<void> {
+  const s = store();
+  const me = s.team.info?.pubkey;
+  const peer = s.team.members.find((m) => m.pubkey === pubkey);
+  if (!me || !peer || pubkey === me) return;
+  const sharedId = dmId(me, pubkey);
+  const have = convOf(sharedId);
+  if (have) return s.setActive(have.id);
+  if (!hasChannels()) throw new Error("This team's relay is an earlier version that cannot keep a conversation between two people. Update the relay first.");
+  await teamPublish("conv.put", JSON.stringify({ conv: sharedId, name: "dm", private: true }));
+  await teamPublish("conv.add", JSON.stringify({ conv: sharedId, member: pubkey }));
+  const id = `pm-${sharedId.replace(/[^a-z0-9]/gi, "").slice(2, 14).toLowerCase()}`;
+  // Their side may have reached us in the meantime.
+  if (!convOf(sharedId)) {
+    s.addConv({ id, kind: "channel", name: peer.name, members: AGENTS.map((a) => a.id), dir: "", createdAt: Date.now(), shared: { id: sharedId, since: Date.now(), private: true }, person: { pubkey } });
+    if (inTauri) store().setConvDir(id, await ensureSpace(id).catch(() => ""));
+  }
+  const now = convOf(sharedId);
+  if (now) store().setActive(now.id);
+  refreshMembers(sharedId);
 }
 
 function take(e: TeamEvent): void {
@@ -38,7 +67,17 @@ function take(e: TeamEvent): void {
   const change = applyEvent(e, { me, members: s.team.members, convOf: (id) => convOf(id)?.id, msgOf: (id) => s.messages.find((m) => m.id === id) });
   if (e.seq > s.team.head) s.setTeam({ head: e.seq });
   if (!change) return;
-  if (change.t === "conv") void adopt(change.sharedId, change.name);
+  if (change.t === "conv") void adopt(change.sharedId, change.name, change.private);
+  else if (change.t === "joined") {
+    // Added to a channel this Cube does not have: its earlier events are behind what has been read, so they are fetched on their own.
+    if (change.member === me && !convOf(change.sharedId)) startPull(change.sharedId);
+    else refreshMembers(change.sharedId);
+  } else if (change.t === "parted") {
+    const conv = convOf(change.sharedId);
+    // Taken out of a channel: it stays here as an ordinary local one, and nothing more goes out or comes in.
+    if (change.member === me && conv) unshareConv(conv.id);
+    else refreshMembers(change.sharedId);
+  }
   else if (change.t === "rename") s.renameConv(change.convId, change.name);
   else if (change.t === "add") {
     s.addMsg(change.msg);
@@ -93,6 +132,22 @@ function later(): void {
   timer = window.setTimeout(flush, 400);
 }
 
+/** True when the relay keeps channel members, so private channels and channel invites work. */
+export const hasChannels = () => Boolean(store().team.features?.includes("channels"));
+
+/** Starts fetching a channel's history from its beginning, and remembers that it is under way. */
+function startPull(sharedId: string): void {
+  const s = store();
+  if (s.team.pulls?.[sharedId] !== undefined) return;
+  s.setTeam({ pulls: { ...s.team.pulls, [sharedId]: 0 } });
+  void teamAsk({ t: "sync", after: 0, conv: sharedId }).catch(() => undefined);
+}
+
+/** Asks the relay who is in a shared channel. The answer lands in `teamLive.convMembers`. */
+export function refreshMembers(sharedId: string): void {
+  if (hasChannels() && store().teamLive.connected) void teamAsk({ t: "conv.members", conv: sharedId }).catch(() => undefined);
+}
+
 /** Connects to the team this Cube has joined, if any, and keeps shared channels in step from then on. */
 export async function startTeam(outside?: (convId: string, msgId: string) => void): Promise<void> {
   onOutside = outside;
@@ -107,13 +162,35 @@ export async function startTeam(outside?: (convId: string, msgId: string) => voi
         const you = v.you as { name: string; role: TeamMember["role"] };
         // A relay restored from a backup knows less than we have seen: start over.
         const head = Number(v.head) < s.team.head ? 0 : s.team.head;
-        s.setTeam({ me: { name: you.name, role: you.role }, members: v.members as TeamMember[], head });
+        const settings = (v.settings ?? {}) as { member_invites?: boolean };
+        s.setTeam({ me: { name: you.name, role: you.role }, members: v.members as TeamMember[], head, features: Array.isArray(v.features) ? (v.features as string[]) : [], memberInvites: settings.member_invites !== false });
         void teamAsk({ t: "sync", after: head }).catch(() => undefined);
+        // Histories that were being fetched when the connection went are picked up where they stopped.
+        for (const [conv, after] of Object.entries(s.team.pulls ?? {})) void teamAsk({ t: "sync", after, conv }).catch(() => undefined);
         later();
+        break;
+      }
+      case "settings":
+        s.setTeam({ memberInvites: v.member_invites !== false });
+        break;
+      case "conv.members": {
+        const conv = String(v.conv ?? "");
+        const list = Array.isArray(v.members) ? (v.members as { pubkey?: string }[]).map((m) => String(m.pubkey ?? m)).filter(Boolean) : [];
+        if (conv) s.setTeamLive({ convMembers: { ...s.teamLive.convMembers, [conv]: list } });
+        // A conversation between two people is one only while exactly those two are in it. With
+        // anyone else there it is shown as the group it is, so nobody reads along unseen.
+        const local = convOf(conv);
+        const me = s.team.info?.pubkey ?? "";
+        if (local?.person && !(list.length === 2 && list.includes(me) && list.includes(local.person.pubkey))) {
+          s.setConvPerson(local.id, undefined);
+          s.renameConv(local.id, `group-${local.name}`.toLowerCase().replace(/[^\p{L}\p{N}-]+/gu, "-").slice(0, 40));
+        }
         break;
       }
       case "members":
         s.setTeam({ members: v.members as TeamMember[] });
+        // Someone who joined through a channel link, or was taken out of the team, changes who is in a channel without an event of its own.
+        for (const c of sharedConvs()) if (c.shared?.private) refreshMembers(c.shared.id);
         break;
       case "event":
         take(v as unknown as TeamEvent);
@@ -121,11 +198,24 @@ export async function startTeam(outside?: (convId: string, msgId: string) => voi
       case "events": {
         const list = (v.events as TeamEvent[]) ?? [];
         list.forEach(take);
-        if (v.more && list.length) void teamAsk({ t: "sync", after: list[list.length - 1].seq }).catch(() => undefined);
+        const conv = typeof v.conv === "string" && v.conv ? v.conv : undefined;
+        // Where to go on from is what the relay says, not the last event that got through: a page
+        // whose events were all set aside here must not end the catching up.
+        const next = typeof v.next === "number" ? v.next : list.length ? list[list.length - 1].seq : undefined;
+        if (conv) {
+          const pulls = { ...store().team.pulls };
+          if (v.more && next !== undefined) pulls[conv] = next;
+          else delete pulls[conv];
+          store().setTeam({ pulls });
+          if (!v.more) refreshMembers(conv);
+        } else if (next !== undefined && next > store().team.head) {
+          store().setTeam({ head: next });
+        }
+        if (v.more && next !== undefined) void teamAsk({ t: "sync", after: next, ...(conv ? { conv } : {}) }).catch(() => undefined);
         break;
       }
       case "invite":
-        if (s.team.info) s.setTeamLive({ invite: inviteLink(s.team.info.host, String(v.token)), problem: "" });
+        if (s.team.info) s.setTeamLive({ invite: inviteLink(s.team.info.host, String(v.token)), inviteFor: typeof v.conv === "string" ? v.conv : askedFor, problem: "" });
         break;
       case "error":
         s.setTeamLive({ problem: String(v.message ?? "The relay refused that.") });
@@ -157,19 +247,65 @@ export async function leaveTeam(): Promise<void> {
   const s = store();
   for (const c of sharedConvs()) s.setConvShared(c.id, undefined);
   published.clear();
-  s.setTeam({ info: undefined, me: undefined, members: [], head: 0, agents: [] });
+  s.setTeam({ info: undefined, me: undefined, members: [], head: 0, agents: [], pulls: {}, features: [] });
   for (const sub of s.subagents) if (sub.shared) s.putSubagent({ ...sub, shared: false });
-  s.setTeamLive({ connected: false, problem: "", invite: undefined });
+  s.setTeamLive({ connected: false, problem: "", invite: undefined, inviteFor: undefined, convMembers: {} });
 }
 
-/** Starts sharing a channel with the team: what is said in it from now on goes to everyone in the workspace. */
-export async function shareConv(convId: string): Promise<void> {
+/**
+ * Starts sharing a channel: what is said in it from now on goes to the whole team, or, when it is
+ * private, only to the people invited into it. Which of the two is decided here and stays.
+ */
+export async function shareConv(convId: string, isPrivate = false): Promise<void> {
   const conv = store().convs.find((c) => c.id === convId);
   if (!conv || conv.kind !== "channel" || conv.shared) return;
+  if (isPrivate && !hasChannels()) throw new Error("This team's relay is an earlier version that cannot keep a channel private. Update the relay first.");
   const id = crypto.randomUUID();
-  await teamPublish("conv.put", JSON.stringify({ conv: id, name: conv.name }));
-  store().setConvShared(convId, { id, since: Date.now() });
+  await teamPublish("conv.put", JSON.stringify({ conv: id, name: conv.name, ...(isPrivate ? { private: true } : {}) }));
+  store().setConvShared(convId, { id, since: Date.now(), ...(isPrivate ? { private: true } : {}) });
+  refreshMembers(id);
 }
+
+/** Renames a channel here and, when it is shared, for the team. The relay lets the one who shared it, the owner and admins do that. */
+export async function renameChannel(convId: string, name: string): Promise<void> {
+  const conv = store().convs.find((c) => c.id === convId);
+  const next = name.trim().slice(0, 80);
+  if (!conv || !next || next === conv.name) return;
+  if (conv.shared) await teamPublish("conv.put", JSON.stringify({ conv: conv.shared.id, name: next, ...(conv.shared.private ? { private: true } : {}) }));
+  store().renameConv(convId, next);
+}
+
+/** Adds a teammate to a shared channel. Anyone in the channel can. */
+export async function addToConv(convId: string, pubkey: string): Promise<void> {
+  const shared = store().convs.find((c) => c.id === convId)?.shared;
+  if (!shared) return;
+  await teamPublish("conv.add", JSON.stringify({ conv: shared.id, member: pubkey }));
+  refreshMembers(shared.id);
+}
+
+/** Takes someone out of a shared channel; with this person's own key, leaves it. */
+export async function removeFromConv(convId: string, pubkey: string): Promise<void> {
+  const s = store();
+  const shared = s.convs.find((c) => c.id === convId)?.shared;
+  if (!shared) return;
+  await teamPublish("conv.remove", JSON.stringify({ conv: shared.id, member: pubkey }));
+  if (pubkey === s.team.info?.pubkey) unshareConv(convId);
+  else refreshMembers(shared.id);
+}
+
+/** The channel the last invite link was asked for, until the relay's answer says so itself. */
+let askedFor: string | undefined;
+
+/** Asks for an invite link. With a channel, whoever opens it joins the team and lands in that channel. */
+export function askInvite(convId?: string): Promise<void> {
+  const shared = convId ? store().convs.find((c) => c.id === convId)?.shared : undefined;
+  askedFor = shared?.id;
+  store().setTeamLive({ invite: undefined, inviteFor: undefined });
+  return teamAsk({ t: "invite.create", ...(shared ? { conv: shared.id } : {}) });
+}
+
+/** Lets ordinary members bring new people in with channel links, or keeps that to the owner and admins. */
+export const setMemberInvites = (on: boolean) => teamAsk({ t: "settings.set", member_invites: on });
 
 /** Lets teammates call this person's cubes in a channel they share, or stops that. */
 export function setConvOpen(convId: string, open: boolean): void {
@@ -200,7 +336,6 @@ export async function adoptAgent(shared: SharedAgent): Promise<void> {
   if (inTauri) store().setConvDir(`dm-${sub.id}`, await ensureSpace(`dm-${sub.id}`).catch(() => ""));
 }
 
-export const askInvite = () => teamAsk({ t: "invite.create" });
 export const removeMember = (pubkey: string) => teamAsk({ t: "member.remove", pubkey });
 
 /** How a teammate's message reads in a prompt: clearly someone else's words, never an instruction. */

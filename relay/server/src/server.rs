@@ -1,9 +1,12 @@
 //! The WebSocket side of the relay: handshake, frames after `ready`, and
-//! passing accepted events on to every connected member.
+//! passing accepted events on to the connected members who may read them.
 //!
 //! All shared state sits behind one mutex that is never held across an
-//! `.await`. A publish is stored and handed to every connection's queue while
-//! the lock is held, so every client sees events in `seq` order.
+//! `.await`. A publish is stored and handed to the queues of its audience
+//! while the lock is held, so every client sees events in `seq` order.
+//!
+//! Who may read what is decided in `db`. This module asks it for every event
+//! and every request and keeps no copy of a channel's member list.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -32,12 +35,15 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::db::{
-    clean_member_name, sha256_hex, Db, Member, OpError, Role, DEFAULT_INVITE_DAYS, MAX_INVITE_DAYS,
-    MAX_INVITE_USES,
+    clean_member_name, is_pubkey, sha256_hex, valid_ident, Audience, Db, InviteTerms, Member, OpError,
+    Role, DEFAULT_INVITE_DAYS, MAX_INVITE_DAYS, MAX_INVITE_USES,
 };
 use crate::limiter::SlidingWindow;
 
 const RELAY_VERSION: &str = "cube-relay/1";
+/// What this relay does beyond the first version, named in `ready`.
+/// `channels`: private channels, channel member lists, `sync` by channel.
+const FEATURES: [&str; 1] = ["channels"];
 /// How long a single write to a client may take before the handshake gives up.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -79,9 +85,10 @@ enum ClientFrame {
     Sync {
         #[serde(default)]
         after: u64,
+        conv: Option<String>,
     },
     #[serde(rename = "invite.create")]
-    InviteCreate { role: Option<String>, uses: Option<u64>, days: Option<u64> },
+    InviteCreate { role: Option<String>, uses: Option<u64>, days: Option<u64>, conv: Option<String> },
     #[serde(rename = "invite.list")]
     InviteList,
     #[serde(rename = "invite.revoke")]
@@ -92,6 +99,10 @@ enum ClientFrame {
     MemberRole { pubkey: String, role: String },
     #[serde(rename = "member.rename")]
     MemberRename { name: String },
+    #[serde(rename = "conv.members")]
+    ConvMembers { conv: String },
+    #[serde(rename = "settings.set")]
+    SettingsSet { member_invites: bool },
     #[serde(rename = "ping")]
     Ping,
 }
@@ -117,6 +128,8 @@ struct Core {
     fail_addr: SlidingWindow<IpAddr>,
     fail_key: SlidingWindow<String>,
     publish_rate: SlidingWindow<String>,
+    /// `sync` requests, per connection.
+    sync_rate: SlidingWindow<u64>,
 }
 
 /// An authenticated connection, as handed from the handshake to its tasks.
@@ -153,10 +166,6 @@ fn error_frame(id: Option<&str>, code: &str, message: &str) -> Utf8Bytes {
 
 fn ok_frame() -> Utf8Bytes {
     frame(json!({"t": "ok"}))
-}
-
-fn is_pubkey(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// The first characters of a public key, for log lines.
@@ -224,6 +233,21 @@ impl Core {
         }
     }
 
+    /// Queues an event frame for the connections of the members who may have
+    /// it. Membership was read for this event just now; a connection carries
+    /// only its key.
+    fn deliver(&self, audience: &Audience, frame: &Utf8Bytes) {
+        for c in self.conns.values() {
+            let wanted = match audience {
+                Audience::Everyone => true,
+                Audience::Only(members) => members.contains(&c.pubkey),
+            };
+            if wanted && c.tx.try_send(frame.clone()).is_err() {
+                c.kill.cancel();
+            }
+        }
+    }
+
     fn broadcast_members(&self) {
         match self.db.members() {
             Ok(members) => self.broadcast(&frame(json!({"t": "members", "members": members}))),
@@ -269,6 +293,7 @@ impl Relay {
             fail_addr: SlidingWindow::new(l.auth_fail_max, l.auth_fail_window),
             fail_key: SlidingWindow::new(l.auth_fail_max, l.auth_fail_window),
             publish_rate: SlidingWindow::new(l.publish_max, l.publish_window),
+            sync_rate: SlidingWindow::new(l.sync_max, l.sync_window),
         };
         Ok(Arc::new(Relay { cfg, ws, core: Mutex::new(core), shutdown }))
     }
@@ -385,11 +410,13 @@ impl Relay {
     }
 
     /// Adds the connection and queues its `ready` frame. Done under the lock,
-    /// so `head` and the first broadcast event leave no gap.
+    /// so `head` and the first broadcast event leave no gap. `head` is the
+    /// last seq this member is served, not the last one stored.
     fn register(&self, core: &mut Core, me: &Member) -> Result<Session, Denial> {
-        let (members, head) = match (core.db.members(), core.db.head()) {
-            (Ok(members), Ok(head)) => (members, head),
-            (Err(e), _) | (_, Err(e)) => {
+        let db = &core.db;
+        let (members, head, member_invites) = match (db.members(), db.head_for(&me.pubkey), db.member_invites()) {
+            (Ok(members), Ok(head), Ok(member_invites)) => (members, head, member_invites),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                 error!(error = %e, "could not build the ready frame");
                 return Err(DENIED_UNAVAILABLE);
             }
@@ -399,6 +426,8 @@ impl Relay {
             "you": {"pubkey": me.pubkey, "name": me.name, "role": me.role},
             "members": members,
             "head": head,
+            "features": FEATURES,
+            "settings": {"member_invites": member_invites},
         }));
         let (tx, rx) = mpsc::channel(self.cfg.limits.queue_frames.max(1));
         let _ = tx.try_send(ready);
@@ -421,6 +450,11 @@ impl Relay {
             ClientFrame::Publish { event } => self.publish(conn, pubkey, event),
             other => {
                 let mut core = self.core();
+                // Every `sync` counts, before any other work is done for it.
+                if matches!(other, ClientFrame::Sync { .. }) && !core.sync_rate.try_acquire(&conn, Instant::now()) {
+                    core.send(conn, error_frame(None, "rate_limited", "syncing too fast"));
+                    return;
+                }
                 match self.operate(&mut core, pubkey, other) {
                     Ok(reply) => core.send(conn, reply),
                     Err(OpError::Refused { code, message }) => {
@@ -447,12 +481,19 @@ impl Relay {
         };
         let now = unix_now();
         match request {
-            ClientFrame::Sync { after } => {
+            ClientFrame::Sync { after, conv } => {
+                if conv.as_deref().is_some_and(|conv| !valid_ident(conv)) {
+                    return refuse("bad_request", "conv must be a short string");
+                }
                 let l = &self.cfg.limits;
-                let (events, more) = core.db.sync(after, l.sync_page, l.sync_page_bytes)?;
-                Ok(frame(json!({"t": "events", "events": events, "more": more})))
+                let page = core.db.sync_for(&me.pubkey, after, conv.as_deref(), l.sync_page, l.sync_page_bytes)?;
+                let mut reply = json!({"t": "events", "events": page.events, "more": page.more, "next": page.next});
+                if let Some(conv) = conv {
+                    reply["conv"] = json!(conv);
+                }
+                Ok(frame(reply))
             }
-            ClientFrame::InviteCreate { role, uses, days } => {
+            ClientFrame::InviteCreate { role, uses, days, conv } => {
                 let role = match role.as_deref() {
                     None | Some("member") => Role::Member,
                     Some("admin") => Role::Admin,
@@ -461,14 +502,6 @@ impl Relay {
                     }
                     Some(_) => return refuse("bad_request", "role must be member or admin"),
                 };
-                let allowed = match me.role {
-                    Role::Owner => true,
-                    Role::Admin => role == Role::Member,
-                    Role::Member => false,
-                };
-                if !allowed {
-                    return refuse("forbidden", "not allowed to make this invite");
-                }
                 let uses = uses.unwrap_or(1);
                 if !(1..=MAX_INVITE_USES).contains(&uses) {
                     return refuse("bad_request", "uses must be between 1 and 100");
@@ -477,15 +510,15 @@ impl Relay {
                 if !(1..=MAX_INVITE_DAYS).contains(&days) {
                     return refuse("bad_request", "days must be between 1 and 30");
                 }
-                let invite = core.db.create_invite(role, uses, days, &me.pubkey, now)?;
+                // Whether this member may make it is decided with the invite's
+                // channel, in one transaction.
+                let terms = InviteTerms { role, uses, days, conv: conv.as_deref() };
+                let invite = core.db.create_invite_as(&me.pubkey, terms, now)?;
                 info!(invite = %invite.id, role = role.as_str(), by = short(&me.pubkey), "invite created");
                 Ok(frame(json!({"t": "invite", "token": invite.token, "expires_at": invite.expires_at})))
             }
             ClientFrame::InviteList => {
-                if !me.role.is_staff() {
-                    return refuse("forbidden", "only the owner and admins manage invites");
-                }
-                let invites = core.db.list_invites(now)?;
+                let invites = core.db.list_invites_for(&me.pubkey, now)?;
                 Ok(frame(json!({"t": "invites", "invites": invites})))
             }
             ClientFrame::InviteRevoke { id } => {
@@ -518,6 +551,21 @@ impl Relay {
                 };
                 core.db.rename_member(&me.pubkey, &name)?;
                 core.broadcast_members();
+                Ok(ok_frame())
+            }
+            ClientFrame::ConvMembers { conv } => {
+                let found = core.db.conv_members(&me.pubkey, &conv)?;
+                Ok(frame(json!({
+                    "t": "conv.members",
+                    "conv": conv,
+                    "private": found.private,
+                    "members": found.members,
+                })))
+            }
+            ClientFrame::SettingsSet { member_invites } => {
+                core.db.set_member_invites(&me.pubkey, member_invites)?;
+                info!(member_invites, by = short(&me.pubkey), "settings changed");
+                core.broadcast(&frame(json!({"t": "settings", "member_invites": member_invites})));
                 Ok(ok_frame())
             }
             ClientFrame::Publish { .. } | ClientFrame::Ping => refuse("bad_request", "unexpected frame"),
@@ -567,7 +615,14 @@ impl Relay {
                 core.send(conn, frame(json!({"t": "ok", "id": event.id, "seq": done.seq})));
                 if done.fresh {
                     debug!(seq = done.seq, kind = %event.kind, by = short(pubkey), "event accepted");
-                    core.broadcast(&frame(EventFrame { t: "event", seq: done.seq, event: &event }));
+                    // Read after the event was applied, so a member it just added is in.
+                    match core.db.audience(done.seq) {
+                        Ok(audience) => {
+                            core.deliver(&audience, &frame(EventFrame { t: "event", seq: done.seq, event: &event }));
+                        }
+                        // Nobody is sent it live; it is stored, and a later sync returns it.
+                        Err(e) => error!(error = %e, seq = done.seq, "could not read who an event is for"),
+                    }
                 }
             }
             Err(OpError::Refused { code, message }) => {

@@ -26,11 +26,16 @@ export interface Conv {
   dir: string;
   createdAt: number;
   /**
+   * A direct conversation with one teammate, by their key. It is a private shared channel with
+   * the two of them in it; the cubes are there too, and join only when they are named.
+   */
+  person?: { pubkey: string };
+  /**
    * Shared with the team: its id on the relay, and since when what is said here goes out.
    * `open` lets teammates call this person's cubes here by naming them, and lets the Router
    * decide whether a teammate's message wants an answer.
    */
-  shared?: { id: string; since: number; open?: boolean };
+  shared?: { id: string; since: number; open?: boolean; /** Only the people invited into it see it. Set when the channel is shared and never changed. */ private?: boolean };
 }
 
 export interface Act {
@@ -318,9 +323,24 @@ interface CubeState {
   /** Sub-agents the person made, or brought in from a teammate. They join the team beside the built-in roles. */
   subagents: SubAgent[];
   /** The team this Cube has joined, as the relay last described it. `agents` are the sub-agents teammates offer. */
-  team: { info?: { host: string; ws: string; workspace: string; pubkey: string }; me?: { name: string; role: TeamMember["role"] }; members: TeamMember[]; head: number; agents?: SharedAgent[] };
+  team: { info?: { host: string; ws: string; workspace: string; pubkey: string }; me?: { name: string; role: TeamMember["role"] }; members: TeamMember[]; head: number; agents?: SharedAgent[];
+    /** What the relay can do beyond the first version of the contract, e.g. "channels". */
+    features?: string[];
+    /** Whether ordinary members may bring new people in with a channel invite link. The owner decides. */
+    memberInvites?: boolean;
+    /** Channels this person was added to whose earlier history is still being fetched: shared id → the seq to go on from. Kept, so a restart picks it up. */
+    pulls?: Record<string, number>;
+  };
   /** The connection to the relay right now. Not kept across restarts. */
-  teamLive: { connected: boolean; problem: string; invite?: string };
+  teamLive: {
+    connected: boolean;
+    problem: string;
+    invite?: string;
+    /** The shared channel the invite link is for, when it is for one. */
+    inviteFor?: string;
+    /** Who is in each shared channel, by shared id, as the relay last said. */
+    convMembers?: Record<string, string[]>;
+  };
   /** The connection to Slack right now. Not kept across restarts. */
   slackLive: { configured: boolean; connected: boolean; team: string; problem: string; /** Permissions the Slack app lacks for what Cube does there. */ missing?: string[] };
   /** How Cube keeps its memory, skills and wiki, and what the background jobs have done. */
@@ -396,6 +416,8 @@ interface CubeState {
   setTeam(patch: Partial<CubeState["team"]>): void;
   setTeamLive(patch: Partial<CubeState["teamLive"]>): void;
   setConvShared(convId: string, shared: Conv["shared"]): void;
+  /** Says a conversation is, or is no longer, a direct one with a teammate. */
+  setConvPerson(convId: string, person: Conv["person"]): void;
   renameConv(convId: string, name: string): void;
   setSlackLive(patch: Partial<CubeState["slackLive"]>): void;
   setKnowledge(patch: Partial<KnowledgeState>): void;
@@ -438,6 +460,8 @@ interface CubeState {
   goHome(): void;
   setActive(id: string): void;
   addConv(conv: Conv): void;
+  /** Takes a conversation and everything said in it out of Cube. Its folder is not touched here. */
+  removeConv(id: string): void;
   setConvDir(id: string, dir: string): void;
   addMsg(msg: Msg): void;
   patchMsg(id: string, patch: Partial<Msg> | ((m: Msg) => Partial<Msg>)): void;
@@ -583,6 +607,7 @@ export const useCube = create<CubeState>()(
       setTeam: (patch) => set((s) => ({ team: { ...s.team, ...patch } })),
       setTeamLive: (patch) => set((s) => ({ teamLive: { ...s.teamLive, ...patch } })),
       setConvShared: (convId, shared) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, shared } : c)) })),
+      setConvPerson: (convId, person) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, person } : c)) })),
       renameConv: (convId, name) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, name } : c)) })),
       setSlackLive: (patch) => set((s) => ({ slackLive: { ...s.slackLive, ...patch } })),
       setKnowledge: (patch) => set((s) => ({ knowledge: { ...s.knowledge, ...patch } })),
@@ -662,6 +687,21 @@ export const useCube = create<CubeState>()(
       goHome: () => set({ view: "home", threadId: undefined }),
       setActive: (id) => set((s) => ({ view: "conv", activeId: id, threadId: undefined, unread: { ...s.unread, [id]: 0 } })),
       addConv: (conv) => set((s) => ({ convs: [...s.convs, conv] })),
+      removeConv: (id) =>
+        set((s) => {
+          const without = <T,>(map: Record<string, T>) => Object.fromEntries(Object.entries(map).filter(([key]) => key !== id));
+          return {
+            convs: s.convs.filter((c) => c.id !== id),
+            messages: s.messages.filter((m) => m.convId !== id),
+            unread: without(s.unread),
+            files: without(s.files),
+            tabs: without(s.tabs),
+            selected: without(s.selected),
+            activeId: s.activeId === id ? "general" : s.activeId,
+            view: s.view === "conv" && s.activeId === id ? "home" : s.view,
+            threadId: s.activeId === id ? undefined : s.threadId,
+          };
+        }),
       setConvDir: (id, dir) => set((s) => ({ convs: s.convs.map((c) => (c.id === id ? { ...c, dir } : c)) })),
       addMsg: (msg) =>
         set((s) => ({

@@ -17,9 +17,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 const SERVICE: &str = "app.cube.desktop.team";
 const ACCOUNT: &str = "membership";
 /// The kinds of event this side will sign. Nothing else can be published through it.
-const KINDS: [&str; 6] = ["conv.put", "msg.post", "msg.edit", "msg.delete", "agent.put", "agent.drop"];
+const KINDS: [&str; 8] = ["conv.put", "conv.add", "conv.remove", "msg.post", "msg.edit", "msg.delete", "agent.put", "agent.drop"];
 /// What the webview may ask of the relay besides publishing.
-const ASKS: [&str; 7] = ["sync", "invite.create", "invite.list", "invite.revoke", "member.remove", "member.role", "member.rename"];
+const ASKS: [&str; 9] = ["sync", "invite.create", "invite.list", "invite.revoke", "member.remove", "member.role", "member.rename", "conv.members", "settings.set"];
 
 /// What is kept in the Keychain once an invite has been accepted.
 #[derive(Serialize, Deserialize, Clone)]
@@ -255,6 +255,9 @@ async fn session(app: &AppHandle, pin: &Pin, rx: &mut mpsc::UnboundedReceiver<St
     }
     let mut ping = tokio::time::interval(Duration::from_secs(25));
     ping.tick().await;
+    // The relay answers every ping. One that has said nothing for a good while is gone, whatever
+    // the socket looks like (a Mac that slept, a network that changed): dial again.
+    let mut heard = std::time::Instant::now();
     loop {
         tokio::select! {
             out = rx.recv() => match out {
@@ -269,11 +272,12 @@ async fn session(app: &AppHandle, pin: &Pin, rx: &mut mpsc::UnboundedReceiver<St
                 }
             },
             _ = ping.tick() => {
-                if socket.send(Message::text(json!({ "t": "ping" }).to_string())).await.is_err() {
+                if heard.elapsed() > Duration::from_secs(70) || socket.send(Message::text(json!({ "t": "ping" }).to_string())).await.is_err() {
                     return End::Lost("The connection to the relay broke.".into());
                 }
             }
             frame = socket.next() => {
+                heard = std::time::Instant::now();
                 let text = match frame {
                     Some(Ok(Message::Text(text))) => text,
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,

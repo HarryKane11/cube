@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import type { SharedAgent } from "@/agents/subagents";
 import { cn } from "@/lib/utils";
 import { useCube } from "@/state/store";
-import { adoptAgent, askInvite, joinTeam, leaveTeam, nameOf, removeMember, setConvOpen, shareConv, unshareConv } from "@/team";
+import { adoptAgent, askInvite, joinTeam, leaveTeam, nameOf, openDm, removeMember, setConvOpen, setMemberInvites, shareConv, unshareConv } from "@/team";
 
 const pill = "h-8 flex-none rounded-full bg-secondary px-3 text-[13px] font-semibold disabled:opacity-35";
 const primary = "h-8 flex-none rounded-full bg-primary px-3 text-[13px] font-semibold text-primary-foreground disabled:opacity-35";
@@ -14,7 +14,7 @@ const ROLE = { owner: "Owner", admin: "Admin", member: "Member" } as const;
 const NO_OFFERS: SharedAgent[] = [];
 
 /** An invite link as a QR code, for showing on a screen or dropping into a message. Black on white, so any camera reads it. */
-function InviteQr({ link }: { link: string }) {
+export function InviteQr({ link }: { link: string }) {
   const svg = useMemo(() => {
     const qr = qrcode(0, "M");
     qr.addData(link);
@@ -99,6 +99,8 @@ function Members() {
   const [copied, setCopied] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const canManage = team.me?.role === "owner" || team.me?.role === "admin";
+  // A link made for one channel is shown in that channel, not here.
+  const teamInvite = live.inviteFor ? undefined : live.invite;
   if (!team.info) return null;
   return (
     <>
@@ -128,27 +130,39 @@ function Members() {
                 <div className="truncate font-medium" data-notranslate>{nameOf(m.pubkey, team.members)}{m.pubkey === team.info?.pubkey && <span className="font-normal text-muted-foreground"> (you)</span>}</div>
                 <div className="text-[13px] text-muted-foreground">{ROLE[m.role]} · <span className="font-mono text-xs" data-notranslate title={m.pubkey}>{m.pubkey.slice(0, 12)}…</span></div>
               </div>
+              {m.pubkey !== team.info?.pubkey && team.features?.includes("channels") && <button type="button" className={pill} onClick={() => void openDm(m.pubkey).catch((e) => setLive({ problem: String(e) }))}>Message</button>}
               {canManage && m.pubkey !== team.info?.pubkey && m.role === "member" && <button type="button" className={pill} onClick={() => void removeMember(m.pubkey).catch((e) => setLive({ problem: String(e) }))}>Remove</button>}
             </li>
           ))}
         </ul>
       </Section>
 
+      {team.me?.role === "owner" && team.features?.includes("channels") && (
+        <Section title="Who can invite">
+          <Switch
+            label="Members can invite new people"
+            hint="On: anyone in a channel can make a link that brings a new person into the team and that channel. Off: only you and admins bring new people in. Adding people who are already in the team to a channel is always open to its members."
+            checked={team.memberInvites !== false}
+            onChange={(on) => void setMemberInvites(on).catch((e) => setLive({ problem: String(e) }))}
+          />
+        </Section>
+      )}
+
       {canManage && (
         <Section title="Invite someone">
-          <p className="mb-3 text-[13px] text-muted-foreground">An invite link works once and for seven days. Send it to one person, over a channel you trust: whoever opens it first joins as a member and can read every shared channel, from its beginning.</p>
+          <p className="mb-3 text-[13px] text-muted-foreground">An invite link works once and for seven days. Send it to one person, over a channel you trust: whoever opens it first joins as a member and can read every channel shared with the whole team, from its beginning.</p>
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" className={primary} disabled={!live.connected} onClick={() => { setCopied(false); void askInvite().catch((e) => setLive({ problem: String(e) })); }}>Make an invite link</button>
-            {live.invite && (
+            {teamInvite && (
               <>
-                <code className="selectable min-w-0 flex-1 truncate rounded-lg bg-secondary px-2.5 py-1.5 text-xs" data-notranslate>{live.invite}</code>
-                <button type="button" className={pill} onClick={() => void navigator.clipboard.writeText(live.invite ?? "").then(() => setCopied(true))}>{copied ? "Copied" : "Copy link"}</button>
+                <code className="selectable min-w-0 flex-1 truncate rounded-lg bg-secondary px-2.5 py-1.5 text-xs" data-notranslate>{teamInvite}</code>
+                <button type="button" className={pill} onClick={() => void navigator.clipboard.writeText(teamInvite ?? "").then(() => setCopied(true))}>{copied ? "Copied" : "Copy link"}</button>
               </>
             )}
           </div>
-          {live.invite && (
+          {teamInvite && (
             <div className="mt-3 flex flex-wrap items-center gap-4">
-              <InviteQr link={live.invite} />
+              <InviteQr link={teamInvite} />
               <p className="min-w-[200px] flex-1 text-[13px] text-muted-foreground">The same link as a QR code. Your teammate pastes the link into Settings &gt; People &gt; Join a team in their Cube. Whoever has the link or a picture of this code can join once, so do not post it where others can see it.</p>
             </div>
           )}
@@ -162,26 +176,32 @@ function Members() {
 function Sharing() {
   const convs = useCube((s) => s.convs);
   const connected = useCube((s) => s.teamLive.connected);
+  const channels = useCube((s) => Boolean(s.team.features?.includes("channels")));
   const [error, setError] = useState("");
-  const channels = convs.filter((c) => c.kind === "channel");
+  // A conversation with one teammate is not a channel to share or stop sharing.
+  const list = convs.filter((c) => c.kind === "channel" && !c.person);
   return (
     <Section title="Shared channels">
       <p className="mb-1 text-[13px] text-muted-foreground">
-        A shared channel goes to everyone in the team, from the moment you share it: your messages and your cubes' answers, with anything that looks like a credential hidden. Earlier messages stay here. In a shared channel your cubes always ask before they run a command, because part of what they read there was written by other people.
+        Share a channel with the whole team, or only with the people you invite into it. From then on your messages and your cubes' answers go there, with anything that looks like a credential hidden. Earlier messages stay here. In a shared channel your cubes always ask before they run a command, because part of what they read there was written by other people. To invite people, open the channel and press Invite.
       </p>
       <div className={cn(!connected && "opacity-60")}>
-        {channels.map((c) => (
+        {list.map((c) => (
           <div key={c.id} className="contents">
-          <Switch
-            label={`#${c.name}`}
-            hint={c.shared ? (c.shared.since ? "Shared with your team" : "A teammate's channel") : "Only on this Mac"}
-            checked={Boolean(c.shared)}
-            onChange={(on) => {
-              setError("");
-              if (on) void shareConv(c.id).catch((e) => setError(String(e)));
-              else unshareConv(c.id);
-            }}
-          />
+          <div className="flex flex-wrap items-center gap-2 border-b py-3">
+            <div className="min-w-[160px] flex-1">
+              <div className="font-medium" data-notranslate>#{c.name}</div>
+              <div className="text-[13px] text-muted-foreground">{!c.shared ? "Only on this Mac" : c.shared.private ? "Private: only invited people" : c.shared.since ? "Shared with your team" : "A teammate's channel"}</div>
+            </div>
+            {c.shared ? (
+              <button type="button" className={pill} onClick={() => { setError(""); unshareConv(c.id); }}>Stop sharing</button>
+            ) : (
+              <>
+                <button type="button" className={pill} disabled={!connected} onClick={() => { setError(""); void shareConv(c.id).catch((e) => setError(String(e))); }}>Whole team</button>
+                <button type="button" className={pill} disabled={!connected || !channels} title={channels ? undefined : "The team's relay is an earlier version that cannot do this yet."} onClick={() => { setError(""); void shareConv(c.id, true).catch((e) => setError(String(e))); }}>Invited only</button>
+              </>
+            )}
+          </div>
           {c.shared && (
             <div className="pl-6">
               <Switch

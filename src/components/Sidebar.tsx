@@ -1,8 +1,13 @@
 import { useEffect, useState } from "react";
-import { createChannel } from "@/agents/orchestrator";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { KEPT_CHANNELS, createChannel, deleteChannel } from "@/agents/orchestrator";
+import { inTauri } from "@/agents/runner";
+import { ChannelPeople } from "@/components/ChannelPeople";
+import { RightClick } from "@/components/ui/context-menu";
+import { nameOf, openDm, renameChannel } from "@/team";
 import { AGENTS, agentById } from "@/agents/types";
 import { PersonAvatar } from "@/components/bits";
-import { BookIcon, GearIcon, HashIcon, HomeIcon, InboxIcon, PanelIcon, PlusIcon, SearchIcon } from "@/components/icons";
+import { BookIcon, GearIcon, HashIcon, HomeIcon, InboxIcon, PanelIcon, PlusIcon, SearchIcon, LockIcon } from "@/components/icons";
 import { useInboxCount } from "@/components/Inbox";
 import { Palette } from "@/components/Palette";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -13,12 +18,130 @@ import { useCube, type Conv } from "@/state/store";
 
 const WORD: Record<string, string> = { thinking: "thinking", working: "working", needs: "needs you", stuck: "stuck", done: "done" };
 
+/** A person's mark where a cube would be: the first letter of their name. */
+function Initial({ name, size }: { name: string; size: number }) {
+  return <span className="mx-0.5 flex flex-none items-center justify-center rounded-full bg-secondary font-semibold text-foreground" style={{ width: size, height: size, fontSize: size * 0.42 }} aria-hidden="true" data-notranslate>{name.trim().charAt(0).toUpperCase() || "?"}</span>;
+}
+
+/** Picks the teammate to write to. */
+function NewDm({ onClose }: { onClose: () => void }) {
+  const team = useCube((s) => s.team);
+  const [error, setError] = useState("");
+  const others = team.members.filter((m) => m.pubkey !== team.info?.pubkey);
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>New message</DialogTitle>
+          <DialogDescription>A conversation between you and one teammate. Your cubes are there too, and answer only when you name one with @.</DialogDescription>
+        </DialogHeader>
+        <ul className="flex max-h-[50vh] flex-col overflow-auto">
+          {others.map((m) => (
+            <li key={m.pubkey}>
+              <button type="button" className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-accent" onClick={() => void openDm(m.pubkey).then(onClose).catch((e) => setError(String(e)))}>
+                <Initial name={m.name} size={28} />
+                <span className="min-w-0 flex-1 truncate" data-notranslate>{nameOf(m.pubkey, team.members)}</span>
+              </button>
+            </li>
+          ))}
+          {others.length === 0 && <li className="py-2 text-[13px] text-muted-foreground">Nobody else is in the team yet. Invite someone from a channel, or in Settings.</li>}
+        </ul>
+        {error && <p className="text-[13px] text-destructive" role="alert" data-notranslate>{error}</p>}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function Unread({ n }: { n: number }) {
   if (!n) return null;
   return <span className="ml-auto rounded-full bg-primary px-1.5 text-[11px] font-bold leading-[18px] text-primary-foreground tabular-nums">{n}</span>;
 }
 
+/** A conversation in the sidebar, with what can be done to it on a right click. */
 function Row({ conv, rail }: { conv: Conv; rail?: boolean }) {
+  const unread = useCube((s) => s.unread[conv.id] ?? 0);
+  const inTeam = useCube((s) => Boolean(s.team.info));
+  const openProfile = useCube((s) => s.openProfile);
+  const [dialog, setDialog] = useState<"people" | "rename" | "delete">();
+  const agent = conv.kind === "dm" ? agentById(conv.members[0]) : undefined;
+  const folder = inTauri && conv.dir ? { label: "Show folder in Finder", onSelect: () => void openPath(conv.dir).catch(() => undefined) } : undefined;
+  const items = agent
+    ? [{ label: "Open profile", onSelect: () => openProfile(agent.id) }, folder]
+    : conv.person
+      ? [unread > 0 && { label: "Mark as read", onSelect: () => useCube.setState((s) => ({ unread: { ...s.unread, [conv.id]: 0 } })) }, folder, "-" as const, { label: "Delete conversation…", danger: true, onSelect: () => setDialog("delete") }]
+      : [
+        inTeam && { label: conv.shared ? "Invite people…" : "Share and invite…", onSelect: () => setDialog("people") },
+        { label: "Rename…", onSelect: () => setDialog("rename") },
+        unread > 0 && { label: "Mark as read", onSelect: () => useCube.setState((s) => ({ unread: { ...s.unread, [conv.id]: 0 } })) },
+        folder,
+        "-" as const,
+        !KEPT_CHANNELS.includes(conv.id) && { label: "Delete channel…", danger: true, onSelect: () => setDialog("delete") },
+      ];
+  return (
+    <>
+      <RightClick items={items}><RowButton conv={conv} rail={rail} /></RightClick>
+      {!agent && dialog === "people" && <ChannelPeople conv={conv} open onOpenChange={(o) => { if (!o) setDialog(undefined); }} />}
+      {!agent && dialog === "rename" && <RenameChannel conv={conv} onClose={() => setDialog(undefined)} />}
+      {!agent && dialog === "delete" && <DeleteChannel conv={conv} onClose={() => setDialog(undefined)} />}
+    </>
+  );
+}
+
+function RenameChannel({ conv, onClose }: { conv: Conv; onClose: () => void }) {
+  const [name, setName] = useState(conv.name);
+  const [error, setError] = useState("");
+  const save = () => void renameChannel(conv.id, name).then(onClose).catch((e) => setError(String(e)));
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Rename channel</DialogTitle>
+          <DialogDescription>{conv.shared ? "The new name shows for everyone who has this channel." : "Only the name changes. The folder and what was said stay as they are."}</DialogDescription>
+        </DialogHeader>
+        <form className="flex flex-col gap-3" onSubmit={(e) => { e.preventDefault(); save(); }}>
+          <Input autoFocus aria-label="Channel name" value={name} onChange={(e) => setName(e.target.value)} className="selectable h-9" />
+          {error && <p className="text-[13px] text-destructive" role="alert" data-notranslate>{error}</p>}
+          <DialogFooter>
+            <button type="button" className="h-8 rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={onClose}>Cancel</button>
+            <button type="submit" className="h-8 rounded-full bg-primary px-3 text-[13px] font-semibold text-primary-foreground disabled:opacity-40" disabled={!name.trim() || name.trim() === conv.name}>Rename</button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DeleteChannel({ conv, onClose }: { conv: Conv; onClose: () => void }) {
+  const count = useCube((s) => s.messages.filter((m) => m.convId === conv.id).length);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const remove = () => {
+    setBusy(true);
+    void deleteChannel(conv.id).then((problem) => (problem ? setError(problem) : onClose())).finally(() => setBusy(false));
+  };
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{conv.person ? "Delete this conversation?" : "Delete this channel?"}</DialogTitle>
+          <DialogDescription>
+            {conv.shared
+              ? "You leave the channel and it is removed from this Cube. The team keeps what was said in it. Its folder on this Mac goes to the Trash, from where you can take the files back."
+              : "Its messages are removed from Cube and cannot be brought back. Its folder goes to the Trash, from where you can take the files back."}
+          </DialogDescription>
+        </DialogHeader>
+        <p className="text-[13px]"><span className="font-semibold" data-notranslate>{conv.person ? conv.name : `#${conv.name}`}</span><span className="text-muted-foreground" data-notranslate> · {count}</span> <span className="text-muted-foreground">messages</span></p>
+        {error && <p className="text-[13px] text-destructive" role="alert" data-notranslate>{error}</p>}
+        <DialogFooter>
+          <button type="button" className="h-8 rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={onClose}>{error ? "Close" : "Keep"}</button>
+          {!error && <button type="button" className="h-8 rounded-full bg-destructive px-3 text-[13px] font-semibold text-white disabled:opacity-40" disabled={busy} onClick={remove}>{conv.person ? "Delete conversation" : "Delete channel"}</button>}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RowButton({ conv, rail }: { conv: Conv; rail?: boolean }) {
   const active = useCube((s) => s.view === "conv" && s.activeId === conv.id);
   const unread = useCube((s) => s.unread[conv.id] ?? 0);
   const setActive = useCube((s) => s.setActive);
@@ -32,12 +155,12 @@ function Row({ conv, rail }: { conv: Conv; rail?: boolean }) {
       <button
         type="button"
         aria-current={active ? "page" : undefined}
-        aria-label={`${agent ? conv.name : `#${conv.name}`}${unread ? `, ${unread} unread` : ""}`}
-        title={agent ? conv.name : `#${conv.name}`}
+        aria-label={`${agent || conv.person ? conv.name : `#${conv.name}`}${unread ? `, ${unread} unread` : ""}`}
+        title={agent || conv.person ? conv.name : `#${conv.name}`}
         className={cn("relative flex size-10 items-center justify-center rounded-xl", active ? "bg-secondary" : "hover:bg-accent")}
         onClick={() => setActive(conv.id)}
       >
-        {agent ? <Cube color={agent.color} status={status} size={30} /> : <HashIcon className="text-muted-foreground" width={17} height={17} />}
+        {agent ? <Cube color={agent.color} status={status} size={30} /> : conv.person ? <Initial name={conv.name} size={28} /> : <HashIcon className="text-muted-foreground" width={17} height={17} />}
         {(unread > 0 || status === "needs") && <span className="absolute right-1 top-1 size-2 rounded-full bg-primary" />}
       </button>
     );
@@ -48,13 +171,13 @@ function Row({ conv, rail }: { conv: Conv; rail?: boolean }) {
       aria-current={active ? "page" : undefined}
       className={cn(
         "flex w-full items-center gap-2 rounded-[10px] px-2 text-left",
-        agent ? "min-h-[40px]" : "min-h-[32px]",
+        agent || conv.person ? "min-h-[40px]" : "min-h-[32px]",
         active ? "bg-secondary font-semibold" : "hover:bg-accent",
         unread > 0 && "font-semibold",
       )}
       onClick={() => setActive(conv.id)}
     >
-      {agent ? <Cube color={agent.color} status={status} size={32} /> : <HashIcon className="mx-1.5 text-muted-foreground" width={16} height={16} />}
+      {agent ? <Cube color={agent.color} status={status} size={32} /> : conv.person ? <Initial name={conv.name} size={28} /> : conv.shared?.private ? <LockIcon className="mx-1.5 text-muted-foreground" width={16} height={16} /> : <HashIcon className="mx-1.5 text-muted-foreground" width={16} height={16} />}
       <span className="min-w-0 flex-1 truncate">{conv.name}</span>
       {!agent && busy && <span className="size-1.5 animate-pulse rounded-full bg-primary" aria-label="Agents are working here" />}
       {agent && WORD[status] && !unread && (
@@ -132,6 +255,8 @@ export function Sidebar() {
   const waiting = useInboxCount();
   const [creating, setCreating] = useState(false);
   const [switching, setSwitching] = useState(false);
+  const [dmOpen, setDmOpen] = useState(false);
+  const inTeam = useCube((s) => Boolean(s.team.info));
   const wide = useCube((s) => s.settings.sidebar);
   const setSetting = useCube((s) => s.setSetting);
 
@@ -173,7 +298,8 @@ export function Sidebar() {
           <BookIcon width={17} height={17} />
         </button>
         <span className="my-1 h-px w-6 flex-none bg-border" />
-        {convs.filter((c) => c.kind === "channel").map((c) => <Row conv={c} rail key={c.id} />)}
+        {convs.filter((c) => c.kind === "channel" && !c.person).map((c) => <Row conv={c} rail key={c.id} />)}
+        {convs.filter((c) => c.person).map((c) => <Row conv={c} rail key={c.id} />)}
         {convs.filter((c) => c.kind === "dm").map((c) => <Row conv={c} rail key={c.id} />)}
         <button type="button" aria-label="Settings" title="Settings" aria-current={view === "settings" ? "page" : undefined} className={cn(railButton, "mt-auto flex-none", view === "settings" && "bg-secondary text-foreground")} onClick={openSettings}>
           <GearIcon />
@@ -233,13 +359,22 @@ export function Sidebar() {
         </button>
       </div>
       <div className="flex flex-col gap-0.5">
-        {convs.filter((c) => c.kind === "channel").map((c) => <Row conv={c} key={c.id} />)}
+        {convs.filter((c) => c.kind === "channel" && !c.person).map((c) => <Row conv={c} key={c.id} />)}
       </div>
 
-      <div className={label}>Direct messages</div>
+      <div className="flex items-center justify-between">
+        <div className={label}>Direct messages</div>
+        {inTeam && (
+          <button type="button" aria-label="New message to a teammate" title="New message to a teammate" className="mt-3 flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => setDmOpen(true)}>
+            <PlusIcon width={15} height={15} />
+          </button>
+        )}
+      </div>
       <div className="flex flex-col gap-0.5">
+        {convs.filter((c) => c.person).map((c) => <Row conv={c} key={c.id} />)}
         {convs.filter((c) => c.kind === "dm").map((c) => <Row conv={c} key={c.id} />)}
       </div>
+      {dmOpen && <NewDm onClose={() => setDmOpen(false)} />}
 
       <div className="mt-auto flex items-center gap-2 px-2 pt-3">
         <PersonAvatar size={28} />

@@ -49,6 +49,7 @@ export const UserIcon = (p: P) => <Svg {...p}><circle cx="10" cy="7" r="3" /><pa
 export const CubeIcon = (p: P) => <Svg {...p}><path d="M10 2.75 16.25 6.25v7.5L10 17.25 3.75 13.75v-7.5L10 2.75Z" /><path d="M3.75 6.25 10 9.75l6.25-3.5M10 9.75v7.5" /></Svg>;
 export const PlugIcon = (p: P) => <Svg {...p}><path d="M7.5 3v4M12.5 3v4M5.5 7h9v2.5a4.5 4.5 0 0 1-9 0V7ZM10 14v3" /></Svg>;
 export const BookIcon = (p: P) => <Svg {...p}><path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H16v11.5H5.5A1.5 1.5 0 0 0 4 16V4.5ZM4 16a1.5 1.5 0 0 0 1.5 1.5H16M7.5 6.5h5" /></Svg>;
+export const LockIcon = (p: P) => <Svg {...p}><rect x="4.5" y="9" width="11" height="7.5" rx="2" /><path d="M7 9V6.75a3 3 0 0 1 6 0V9" /></Svg>;
 export const PeopleIcon = (p: P) => <Svg {...p}><circle cx="7.5" cy="7" r="2.5" /><path d="M2.75 16c.4-2.6 2.3-4 4.75-4s4.35 1.4 4.75 4" /><circle cx="14" cy="7.5" r="2" /><path d="M14.2 11.6c1.8.2 3 1.5 3.3 3.9" /></Svg>;
 export const BellIcon = (p: P) => <Svg {...p}><path d="M5.5 13.5V9a4.5 4.5 0 0 1 9 0v4.5l1.25 1.5H4.25L5.5 13.5ZM8.5 17h3" /></Svg>;
 export const DataIcon = (p: P) => <Svg {...p}><ellipse cx="10" cy="5.5" rx="5.5" ry="2.25" /><path d="M4.5 5.5v9c0 1.25 2.45 2.25 5.5 2.25s5.5-1 5.5-2.25v-9M4.5 10c0 1.25 2.45 2.25 5.5 2.25s5.5-1 5.5-2.25" /></Svg>;

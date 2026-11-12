@@ -222,7 +222,7 @@ struct Peer {
     key: SigningKey,
     ws: String,
     ready: Value,
-    /// `event` and `members` frames that arrived while waiting for a reply.
+    /// `event`, `members` and `settings` frames that arrived while waiting for a reply.
     inbox: VecDeque<Value>,
 }
 
@@ -241,7 +241,7 @@ impl Peer {
         loop {
             let frame = recv(&mut self.sock).await.expect("connection closed while waiting for a reply");
             match t(&frame) {
-                "event" | "members" => self.inbox.push_back(frame),
+                "event" | "members" | "settings" => self.inbox.push_back(frame),
                 _ => return frame,
             }
         }
@@ -317,6 +317,70 @@ impl Peer {
     async fn head(&mut self) -> u64 {
         self.sync_from(0).await.0.last().map_or(0, |e| e["seq"].as_u64().unwrap())
     }
+
+    /// One `sync` request, for everything or for one channel.
+    async fn sync_page(&mut self, after: u64, conv: Option<&str>) -> Value {
+        let mut request = json!({"t": "sync", "after": after});
+        if let Some(conv) = conv {
+            request["conv"] = json!(conv);
+        }
+        let reply = self.ask(request).await;
+        assert_eq!(t(&reply), "events", "{reply}");
+        reply
+    }
+
+    /// Everything after `after`, following `next` the way the app does.
+    /// Returns the events and the number of pages it took.
+    async fn sync_all(&mut self, mut after: u64, conv: Option<&str>) -> (Vec<Value>, usize) {
+        let mut all = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = self.sync_page(after, conv).await;
+            pages += 1;
+            let events = page["events"].as_array().unwrap().clone();
+            let more = page["more"] == json!(true);
+            // A page that promises more must bring something and move the position.
+            assert!(!more || !events.is_empty(), "an empty page said there is more: {page}");
+            let next = page["next"].as_u64().unwrap();
+            if let Some(last) = events.last() {
+                assert_eq!(json!(next), last["seq"]);
+            }
+            assert!(!more || next > after);
+            after = next;
+            all.extend(events);
+            if !more {
+                return (all, pages);
+            }
+        }
+    }
+
+    /// The live `event` frames up to and including the one with seq `until`,
+    /// which this peer must be sent.
+    async fn live_until(&mut self, until: u64) -> Vec<Value> {
+        let mut seen = Vec::new();
+        loop {
+            let frame = self.broadcast("event").await;
+            let seq = frame["seq"].as_u64().unwrap();
+            assert!(seq <= until, "waiting for event {until}, which was never sent; got {seq}");
+            seen.push(frame);
+            if seq == until {
+                return seen;
+            }
+        }
+    }
+
+    /// What the relay says to a new connection of this member.
+    async fn ready_again(&self, relay: &TestRelay) -> Value {
+        auth(relay, &self.key).await.unwrap().ready
+    }
+}
+
+fn seqs(events: &[Value]) -> Vec<u64> {
+    events.iter().map(|e| e["seq"].as_u64().unwrap()).collect()
+}
+
+fn post(conv: &str, id: &str, text: &str) -> Value {
+    json!({"conv": conv, "msg": {"id": id, "text": text}})
 }
 
 fn error_code(reply: &Value) -> &str {
@@ -465,7 +529,8 @@ async fn invites_are_listed_without_tokens_and_can_be_revoked() {
     }
     assert_eq!(error_code(&owner.ask(json!({"t": "invite.create", "role": "owner"})).await), "forbidden");
     assert_eq!(error_code(&member.ask(json!({"t": "invite.create"})).await), "forbidden");
-    assert_eq!(error_code(&member.ask(json!({"t": "invite.list"})).await), "forbidden");
+    // A member is shown the invites they made, which is none.
+    assert_eq!(member.ask(json!({"t": "invite.list"})).await, json!({"t": "invites", "invites": []}));
     assert_eq!(error_code(&admin.ask(json!({"t": "invite.create", "role": "admin"})).await), "forbidden");
 
     let admin_token = owner.invite(json!({"role": "admin", "days": 2})).await;
@@ -1098,7 +1163,7 @@ async fn sync_is_paged() {
     // A position ahead of the log (the relay was restored from a backup): the
     // client sees `head` in `ready` and starts over; a sync from there is empty.
     let ahead = owner.ask(json!({"t": "sync", "after": 5000})).await;
-    assert_eq!(ahead, json!({"t": "events", "events": [], "more": false}));
+    assert_eq!(ahead, json!({"t": "events", "events": [], "more": false, "next": 431}));
     let again = auth(&relay, &owner.key).await.unwrap();
     assert_eq!(again.ready["head"], json!(431));
 }
@@ -1232,6 +1297,532 @@ async fn roles_and_names() {
     }
     assert_eq!(error_code(&cy.ask(json!({"t": "member.rename", "name": ""})).await), "bad_request");
     assert_eq!(error_code(&cy.ask(json!({"t": "member.rename", "name": "a\u{0007}b"})).await), "bad_request");
+}
+
+// ---- private channels ----------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_names_features_and_settings() {
+    let relay = TestRelay::start().await;
+    let owner = relay.owner("Ann").await;
+    assert_eq!(owner.ready["features"], json!(["channels"]));
+    assert_eq!(owner.ready["settings"], json!({"member_invites": true}));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_channel_is_invisible_to_those_outside_it() {
+    let relay = TestRelay::start().await;
+    let mut owner = relay.owner("Ann").await;
+    let mut admin = relay.join(&mut owner, "admin", "Bea").await;
+    let mut cy = relay.join(&mut owner, "member", "Cy").await;
+    let mut di = relay.join(&mut owner, "member", "Di").await;
+
+    let public = owner.must("conv.put", json!({"conv": "pub", "name": "Public"})).await;
+    cy.must("conv.put", json!({"conv": "p", "name": "Secret plans", "private": true})).await;
+    cy.must("msg.post", post("p", "m1", "only for the two of us")).await;
+    let added = cy.must("conv.add", json!({"conv": "p", "member": di.pk()})).await;
+    di.must("msg.post", post("p", "m2", "agreed")).await;
+    let marker = di.must("msg.post", post("pub", "m3", "hello all")).await;
+    assert_eq!((public, added, marker), (1, 4, 6));
+
+    // Live: the owner and an admin are sent the public events and nothing else.
+    for outsider in [&mut owner, &mut admin] {
+        let live = outsider.live_until(marker).await;
+        assert_eq!(seqs(&live), vec![public, marker]);
+    }
+    assert_eq!(seqs(&cy.live_until(marker).await), vec![1, 2, 3, 4, 5, 6]);
+    // Di was sent the channel from the event that brought her in.
+    assert_eq!(seqs(&di.live_until(marker).await), vec![1, 4, 5, 6]);
+
+    // Sync and head: the same view. The seqs in between are simply not there.
+    for outsider in [&mut owner, &mut admin] {
+        let (events, pages) = outsider.sync_all(0, None).await;
+        assert_eq!((seqs(&events), pages), (vec![public, marker], 1));
+        let text = serde_json::to_string(&events).unwrap();
+        assert!(!text.contains("Secret plans") && !text.contains("only for the two of us"), "{text}");
+        for conv in ["p", "nowhere"] {
+            let page = outsider.sync_page(0, Some(conv)).await;
+            assert_eq!(page, json!({"t": "events", "events": [], "more": false, "next": marker, "conv": conv}));
+        }
+        assert_eq!(outsider.ready_again(&relay).await["head"], json!(marker));
+    }
+    // More in the channel moves the head of those in it only.
+    let latest = cy.must("msg.post", post("p", "m4", "one more")).await;
+    assert_eq!(owner.ready_again(&relay).await["head"], json!(marker));
+    assert_eq!(admin.ready_again(&relay).await["head"], json!(marker));
+    assert_eq!(di.ready_again(&relay).await["head"], json!(latest));
+    assert_eq!(seqs(&di.sync_all(0, Some("p")).await.0), vec![2, 3, 4, 5, 7]);
+
+    // Changing it: every answer is the one a channel that was never made gets,
+    // whether or not the message id exists.
+    for outsider in [&mut owner, &mut admin] {
+        let me = outsider.pk();
+        for conv in ["p", "nowhere"] {
+            for (kind, body) in [
+                ("msg.post", post(conv, "m9", "let me in")),
+                ("msg.post", post(conv, "m1", "let me in")),
+                ("msg.edit", json!({"conv": conv, "id": "m1", "msg": {"id": "m1", "text": "mine"}})),
+                ("msg.edit", json!({"conv": conv, "id": "nope", "msg": {"text": "mine"}})),
+                ("msg.delete", json!({"conv": conv, "id": "m1"})),
+                ("msg.delete", json!({"conv": conv, "id": "nope"})),
+                ("conv.add", json!({"conv": conv, "member": me})),
+                ("conv.remove", json!({"conv": conv, "member": di.pk()})),
+            ] {
+                let reply = outsider.publish(kind, body).await;
+                assert_eq!(error_code(&reply), "no_conv", "{kind} in {conv}");
+                assert_eq!(reply["message"], json!("the channel does not exist"));
+            }
+            let reply = outsider.ask(json!({"t": "conv.members", "conv": conv})).await;
+            assert_eq!(reply, json!({"t": "error", "code": "no_conv", "message": "the channel does not exist"}));
+            let reply = outsider.ask(json!({"t": "invite.create", "conv": conv})).await;
+            assert_eq!(reply, json!({"t": "error", "code": "no_conv", "message": "the channel does not exist"}));
+        }
+        // Not even a rename or archiving, which an owner or admin may do to any public channel.
+        let reply = outsider.publish("conv.put", json!({"conv": "p", "name": "Opened up", "archived": true})).await;
+        assert_eq!(error_code(&reply), "no_conv");
+        let reply = outsider.publish("conv.put", json!({"conv": "p", "name": "Opened up", "private": false})).await;
+        assert_eq!(error_code(&reply), "no_conv");
+        // Through a channel they can read, the message is "not found".
+        let reply = outsider.publish("msg.delete", json!({"conv": "pub", "id": "m1"})).await;
+        assert_eq!(error_code(&reply), "not_found");
+    }
+
+    // None of that was stored, and the channel is as it was for those in it.
+    assert_eq!(seqs(&cy.sync_all(0, None).await.0), vec![1, 2, 3, 4, 5, 6, 7]);
+    let members = cy.ask(json!({"t": "conv.members", "conv": "p"})).await;
+    assert_eq!(members["private"], json!(true));
+    assert_eq!(members["members"].as_array().unwrap().len(), 2);
+
+    // Visibility is fixed when the channel is made.
+    let reply = cy.publish("conv.put", json!({"conv": "p", "name": "Open", "private": false})).await;
+    assert_eq!(error_code(&reply), "visibility_fixed");
+    let reply = owner.publish("conv.put", json!({"conv": "pub", "name": "Closed", "private": true})).await;
+    assert_eq!(error_code(&reply), "visibility_fixed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_does_not_stall_on_a_long_run_of_private_events() {
+    let relay = TestRelay::start_with(|cfg| cfg.limits.publish_max = 100_000).await;
+    let mut owner = relay.owner("Ann").await;
+    let mut cy = relay.join(&mut owner, "member", "Cy").await;
+
+    owner.must("conv.put", json!({"conv": "pub", "name": "Public"})).await;
+    cy.must("conv.put", json!({"conv": "p", "name": "P", "private": true})).await;
+    for i in 0..450 {
+        cy.must("msg.post", post("p", &format!("a{i}"), "x")).await;
+    }
+    let middle = owner.must("msg.post", post("pub", "pub1", "x")).await;
+    for i in 0..30 {
+        cy.must("msg.post", post("p", &format!("b{i}"), "x")).await;
+    }
+    assert_eq!(middle, 453);
+
+    // More than two full pages of rows lie between the owner's two events:
+    // one request returns both and says that is all.
+    let page = owner.sync_page(0, None).await;
+    assert_eq!(seqs(page["events"].as_array().unwrap()), vec![1, middle]);
+    assert_eq!((page["more"].clone(), page["next"].clone()), (json!(false), json!(middle)));
+    let page = owner.sync_page(middle, None).await;
+    assert_eq!(page, json!({"t": "events", "events": [], "more": false, "next": middle}));
+    let page = owner.sync_page(1, None).await;
+    assert_eq!(seqs(page["events"].as_array().unwrap()), vec![middle]);
+    assert_eq!(owner.ready_again(&relay).await["head"], json!(middle));
+
+    // The member reads all of it, in pages, overall and by channel.
+    let (events, pages) = cy.sync_all(0, None).await;
+    assert_eq!((events.len(), pages), (483, 3));
+    assert_eq!(seqs(&events), (1..=483).collect::<Vec<u64>>());
+    let (events, pages) = cy.sync_all(0, Some("p")).await;
+    assert_eq!((events.len(), pages), (481, 3));
+    assert!(events.iter().all(|e| e["body"].as_str().unwrap().contains(r#""conv":"p""#)));
+    assert_eq!(cy.ready_again(&relay).await["head"], json!(483));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_and_removing_a_channel_member() {
+    let relay = TestRelay::start().await;
+    let mut owner = relay.owner("Ann").await;
+    let mut cy = relay.join(&mut owner, "member", "Cy").await;
+    let mut di = relay.join(&mut owner, "member", "Di").await;
+    let mut ed = relay.join(&mut owner, "member", "Ed").await;
+    let member = |conv: &str, pk: String| json!({"conv": conv, "member": pk});
+
+    cy.must("conv.put", json!({"conv": "p", "name": "P", "private": true})).await;
+    cy.must("msg.post", post("p", "m1", "before Di")).await;
+    cy.must("msg.post", post("p", "m2", "still before Di")).await;
+
+    // Only someone in the channel adds to it; the one added must be on the team.
+    assert_eq!(error_code(&di.publish("conv.add", member("p", di.pk())).await), "no_conv");
+    assert_eq!(error_code(&cy.publish("conv.add", member("p", "f".repeat(64))).await), "not_found");
+    assert_eq!(error_code(&cy.publish("conv.add", member("p", "Di".to_string())).await), "bad_body");
+
+    // The event that adds Di is the first thing she is sent of the channel...
+    let added = cy.must("conv.add", member("p", di.pk())).await;
+    let frame = di.broadcast("event").await;
+    assert_eq!((frame["seq"].clone(), frame["kind"].clone()), (json!(added), json!("conv.add")));
+    let event: Event = serde_json::from_value(frame).unwrap();
+    assert_eq!(verify_event(&event), Ok(()));
+    assert_eq!(event.pubkey, cy.pk());
+    // ...and asking for the channel returns it from its first event.
+    let (history, _) = di.sync_all(0, Some("p")).await;
+    assert_eq!(seqs(&history), vec![1, 2, 3, 4]);
+    assert_eq!(history[0]["kind"], json!("conv.put"));
+    assert!(history[1]["body"].as_str().unwrap().contains("before Di"));
+    assert_eq!(di.ready_again(&relay).await["head"], json!(added));
+
+    let listed = di.ask(json!({"t": "conv.members", "conv": "p"})).await;
+    assert_eq!((t(&listed), listed["conv"].clone(), listed["private"].clone()), ("conv.members", json!("p"), json!(true)));
+    let rows = listed["members"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!((rows[0]["pubkey"].clone(), rows[0]["added_by"].clone()), (json!(cy.pk()), json!(cy.pk())));
+    assert_eq!((rows[1]["pubkey"].clone(), rows[1]["added_by"].clone()), (json!(di.pk()), json!(cy.pk())));
+    assert!(rows[1]["added_at"].as_u64().unwrap().abs_diff(now()) < 5);
+
+    // She is a full member of the channel: posts, and brings in Ed.
+    di.must("msg.post", post("p", "m3", "thanks")).await;
+    di.must("conv.add", member("p", ed.pk())).await;
+    assert_eq!(seqs(&ed.live_until(6).await), vec![6]);
+
+    // Taking someone else out is for the channel's creator (or an owner/admin in it).
+    assert_eq!(error_code(&di.publish("conv.remove", member("p", ed.pk())).await), "forbidden");
+    assert_eq!(error_code(&di.publish("conv.remove", member("p", cy.pk())).await), "forbidden");
+    assert_eq!(error_code(&owner.publish("conv.remove", member("p", di.pk())).await), "no_conv");
+
+    // The removal reaches Di live; what follows in the channel does not.
+    let removed = cy.must("conv.remove", member("p", di.pk())).await;
+    assert_eq!(seqs(&di.live_until(removed).await), vec![5, 6, 7]);
+    cy.must("msg.post", post("p", "m4", "after Di")).await;
+    let marker = owner.must("conv.put", json!({"conv": "pub", "name": "Public"})).await;
+    assert_eq!(seqs(&di.live_until(marker).await), vec![marker]);
+
+    // In sync she is left with the removal and nothing else of the channel.
+    let (events, _) = di.sync_all(0, None).await;
+    assert_eq!(seqs(&events), vec![removed, marker]);
+    assert_eq!(events[0]["kind"], json!("conv.remove"));
+    assert_eq!(di.sync_page(0, Some("p")).await["events"], json!([]));
+    assert_eq!(di.ready_again(&relay).await["head"], json!(marker));
+    assert_eq!(error_code(&di.publish("msg.post", post("p", "m5", "hello?")).await), "no_conv");
+    assert_eq!(error_code(&di.ask(json!({"t": "conv.members", "conv": "p"})).await), "no_conv");
+    // The owner, never in it, saw none of this.
+    assert_eq!(seqs(&owner.sync_all(0, None).await.0), vec![marker]);
+
+    // Ed is still in and has all of it; then he leaves by himself.
+    assert_eq!(seqs(&ed.sync_all(0, Some("p")).await.0), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    let left = ed.must("conv.remove", member("p", ed.pk())).await;
+    assert_eq!(seqs(&ed.live_until(left).await), vec![7, 8, marker, left]);
+    assert_eq!(seqs(&ed.sync_all(0, None).await.0), vec![marker, left]);
+
+    // Removal from the team takes a member out of their channels: coming back
+    // with a new invite, under the same key, does not bring the channel back.
+    assert_eq!(owner.ask(json!({"t": "member.remove", "pubkey": cy.pk()})).await, json!({"t": "ok"}));
+    assert!(closed(&mut cy.sock).await);
+    let token = owner.invite(json!({})).await;
+    let mut back = claim(&relay, cy.key.clone(), &token, "Cy").await.unwrap();
+    assert_eq!(back.ready["head"], json!(marker));
+    assert_eq!(seqs(&back.sync_all(0, None).await.0), vec![marker]);
+    assert_eq!(error_code(&back.publish("msg.post", post("p", "m6", "home?")).await), "no_conv");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn members_invite_to_channels_they_are_in() {
+    let relay = TestRelay::start().await;
+    let mut owner = relay.owner("Ann").await;
+    let mut admin = relay.join(&mut owner, "admin", "Bea").await;
+    let mut cy = relay.join(&mut owner, "member", "Cy").await;
+    let mut di = relay.join(&mut owner, "member", "Di").await;
+    let create = |options: Value| {
+        let mut request = options;
+        request["t"] = json!("invite.create");
+        request
+    };
+
+    cy.must("conv.put", json!({"conv": "p", "name": "P", "private": true})).await;
+    cy.must("msg.post", post("p", "m1", "welcome")).await;
+    di.must("conv.put", json!({"conv": "q", "name": "Q", "private": true})).await;
+    owner.must("conv.put", json!({"conv": "pub", "name": "Public"})).await;
+
+    // A member: only with a channel, only one they can read, only as a member.
+    for refused in [json!({}), json!({"conv": "q"}), json!({"conv": "nowhere"}), json!({"conv": "p", "role": "admin"})] {
+        let reply = cy.ask(create(refused)).await;
+        assert_eq!(reply, json!({"t": "error", "code": "forbidden", "message": "not allowed to make this invite"}));
+    }
+    let token = cy.invite(json!({"conv": "p"})).await;
+    let to_public = di.invite(json!({"conv": "pub", "uses": 2})).await;
+
+    // Members see and revoke their own invites; the owner sees all of them, but
+    // not which private channel one leads to.
+    let mine = cy.ask(json!({"t": "invite.list"})).await;
+    let mine = mine["invites"].as_array().unwrap();
+    assert_eq!(mine.len(), 1);
+    assert_eq!((mine[0]["conv"].clone(), mine[0]["created_by"].clone(), mine[0]["role"].clone()), (json!("p"), json!(cy.pk()), json!("member")));
+    let all = owner.ask(json!({"t": "invite.list"})).await;
+    let all = all["invites"].as_array().unwrap();
+    assert_eq!(all.len(), 2);
+    let by = |pk: String| all.iter().find(|i| i["created_by"] == json!(pk)).unwrap().clone();
+    assert_eq!(by(cy.pk())["conv"], json!(null));
+    assert_eq!(by(di.pk())["conv"], json!("pub"));
+    assert!(!serde_json::to_string(all).unwrap().contains("token"));
+    let revoke = |id: &Value| json!({"t": "invite.revoke", "id": id});
+    assert_eq!(error_code(&di.ask(revoke(&mine[0]["id"])).await), "forbidden");
+    assert_eq!(di.ask(revoke(&by(di.pk())["id"])).await, json!({"t": "ok"}));
+    assert_denied(claim(&relay, generate_key(), &to_public, "Nobody").await, "denied", GENERIC_CLAIM);
+
+    // Whoever claims Cy's invite is in the channel from the first moment.
+    let mut ed = claim(&relay, generate_key(), &token, "Ed").await.unwrap();
+    assert_eq!(ed.role(), "member");
+    assert_eq!(ed.ready["head"], json!(4));
+    assert_eq!(seqs(&ed.sync_all(0, None).await.0), vec![1, 2, 4]);
+    let listed = ed.ask(json!({"t": "conv.members", "conv": "p"})).await;
+    let rows = listed["members"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!((rows[1]["pubkey"].clone(), rows[1]["added_by"].clone()), (json!(ed.pk()), json!(cy.pk())));
+    let said = ed.must("msg.post", post("p", "m2", "hi")).await;
+    assert_eq!(seqs(&cy.live_until(said).await), vec![1, 2, 4, said]);
+
+    // The owner and admins invite to channels they can read, and to none they cannot.
+    assert_eq!(error_code(&owner.ask(create(json!({"conv": "p"}))).await), "no_conv");
+    let token = admin.invite(json!({"conv": "pub"})).await;
+    let mut fay = claim(&relay, generate_key(), &token, "Fay").await.unwrap();
+    let listed = fay.ask(json!({"t": "conv.members", "conv": "pub"})).await;
+    assert_eq!(listed["private"], json!(false));
+    assert_eq!(listed["members"][1]["added_by"], json!(admin.pk()));
+
+    // Only the owner changes the setting; everyone connected is told.
+    let off = json!({"t": "settings.set", "member_invites": false});
+    assert_eq!(error_code(&cy.ask(off.clone()).await), "forbidden");
+    assert_eq!(error_code(&admin.ask(off.clone()).await), "forbidden");
+    assert_eq!(error_code(&owner.ask(json!({"t": "settings.set"})).await), "bad_request");
+    assert_eq!(error_code(&owner.ask(json!({"t": "settings.set", "member_invites": "no"})).await), "bad_request");
+    let outstanding = cy.invite(json!({"conv": "p", "uses": 5})).await;
+    assert_eq!(owner.ask(off).await, json!({"t": "ok"}));
+    for peer in [&mut owner, &mut admin, &mut cy, &mut di, &mut ed, &mut fay] {
+        assert_eq!(peer.broadcast("settings").await, json!({"t": "settings", "member_invites": false}));
+    }
+    assert_eq!(cy.ready_again(&relay).await["settings"], json!({"member_invites": false}));
+
+    // Off: members make no invites, and the ones they had made stop working.
+    assert_eq!(error_code(&cy.ask(create(json!({"conv": "p"}))).await), "forbidden");
+    assert_denied(claim(&relay, generate_key(), &outstanding, "Gus").await, "denied", GENERIC_CLAIM);
+    // The owner and admins are not affected.
+    admin.invite(json!({})).await;
+
+    assert_eq!(owner.ask(json!({"t": "settings.set", "member_invites": true})).await, json!({"t": "ok"}));
+    assert_eq!(cy.broadcast("settings").await, json!({"t": "settings", "member_invites": true}));
+    cy.invite(json!({"conv": "p"})).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_is_rate_limited_per_connection() {
+    let relay = TestRelay::start_with(|cfg| cfg.limits.sync_max = 5).await;
+    let mut owner = relay.owner("Ann").await;
+    for _ in 0..5 {
+        owner.sync_page(0, None).await;
+    }
+    for request in [json!({"t": "sync", "after": 0}), json!({"t": "sync", "after": 0, "conv": "c"})] {
+        let reply = owner.ask(request).await;
+        assert_eq!(reply, json!({"t": "error", "code": "rate_limited", "message": "syncing too fast"}));
+    }
+    // Nothing else on the connection is held back, and another connection of
+    // the same member has its own allowance.
+    assert_eq!(owner.ask(json!({"t": "ping"})).await, json!({"t": "pong"}));
+    owner.must("conv.put", json!({"conv": "c", "name": "C"})).await;
+    let mut second = auth(&relay, &owner.key).await.unwrap();
+    assert_eq!(second.sync_page(0, None).await["next"], json!(1));
+
+    // A channel id that could not exist is refused as malformed.
+    let reply = second.ask(json!({"t": "sync", "after": 0, "conv": ""})).await;
+    assert_eq!(error_code(&reply), "bad_request");
+}
+
+// ---- migration -----------------------------------------------------------------------
+
+/// The schema of version 1, as relays before per-channel access created it.
+const SCHEMA_V1: &str = "
+CREATE TABLE workspace (ws TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+CREATE TABLE members (
+    ws TEXT NOT NULL, pubkey TEXT NOT NULL, name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    joined_at INTEGER NOT NULL, PRIMARY KEY (ws, pubkey)
+);
+CREATE UNIQUE INDEX members_one_owner ON members (ws) WHERE role = 'owner';
+CREATE TABLE invites (
+    ws TEXT NOT NULL, id TEXT NOT NULL, token_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    uses_left INTEGER NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL, PRIMARY KEY (ws, id), UNIQUE (ws, token_hash)
+);
+CREATE TABLE events (
+    ws TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL, pubkey TEXT NOT NULL,
+    created_at INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, sig TEXT,
+    redacted INTEGER NOT NULL DEFAULT 0, msg_id TEXT, PRIMARY KEY (ws, seq), UNIQUE (ws, id)
+);
+CREATE INDEX events_by_msg ON events (ws, msg_id) WHERE msg_id IS NOT NULL;
+CREATE TABLE convs (
+    ws TEXT NOT NULL, conv TEXT NOT NULL, creator TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (ws, conv)
+);
+CREATE TABLE messages (
+    ws TEXT NOT NULL, id TEXT NOT NULL, author TEXT NOT NULL, conv TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (ws, id)
+);
+";
+
+const V1_WS: &str = "00112233445566778899aabbccddeeff";
+
+/// Writes a version 1 database as an older relay left it: Ann (owner) and Bob,
+/// two channels, three posts (one deleted, so its row is redacted) and a
+/// sub-agent offer. Returns the events as they were signed.
+fn write_v1_database(path: &std::path::Path, ann: &SigningKey, bob: &SigningKey) -> Vec<Event> {
+    use rusqlite::params;
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(SCHEMA_V1).unwrap();
+    conn.execute("INSERT INTO workspace VALUES (?1, 1000)", params![V1_WS]).unwrap();
+    for (key, name, role) in [(ann, "Ann", "owner"), (bob, "Bob", "member")] {
+        conn.execute("INSERT INTO members VALUES (?1, ?2, ?3, ?4, 1000)", params![V1_WS, pubkey_hex(key), name, role])
+            .unwrap();
+    }
+    for (conv, creator) in [("general", ann), ("random", bob)] {
+        conn.execute("INSERT INTO convs VALUES (?1, ?2, ?3, 0)", params![V1_WS, conv, pubkey_hex(creator)]).unwrap();
+    }
+    for (id, conv, deleted) in [("m1", "general", false), ("m2", "random", true), ("m3", "random", false)] {
+        conn.execute("INSERT INTO messages VALUES (?1, ?2, ?3, ?4, ?5)", params![V1_WS, id, pubkey_hex(bob), conv, deleted])
+            .unwrap();
+    }
+    let at = now() - 3600;
+    let events = vec![
+        sign_event(ann, at, "conv.put", V1_WS, r#"{"conv":"general","name":"General"}"#),
+        sign_event(bob, at, "conv.put", V1_WS, r#"{"conv":"random","name":"Random"}"#),
+        sign_event(bob, at, "msg.post", V1_WS, r#"{"conv":"general","msg":{"id":"m1","text":"hello from version 1"}}"#),
+        sign_event(bob, at, "msg.post", V1_WS, r#"{"conv":"random","msg":{"id":"m2","text":"pasted by mistake"}}"#),
+        sign_event(bob, at, "msg.delete", V1_WS, r#"{"conv":"random","id":"m2"}"#),
+        sign_event(ann, at, "agent.put", V1_WS, r#"{"agent":{"id":"sub","name":"Legal"}}"#),
+        sign_event(bob, at, "msg.post", V1_WS, r#"{"conv":"random","msg":{"id":"m3","text":"kept"}}"#),
+    ];
+    for (i, event) in events.iter().enumerate() {
+        let seq = i as i64 + 1;
+        let (body, sig, redacted) = if seq == 4 {
+            (r#"{"conv":"random","id":"m2","gone":true}"#.to_string(), None, true)
+        } else {
+            (event.body.clone(), event.sig.clone(), false)
+        };
+        let msg_id = match seq {
+            3 => Some("m1"),
+            4 | 5 => Some("m2"),
+            7 => Some("m3"),
+            _ => None,
+        };
+        conn.execute(
+            "INSERT INTO events VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![V1_WS, seq, event.id, event.pubkey, event.created_at as i64, event.kind, body, sig, redacted, msg_id],
+        )
+        .unwrap();
+    }
+    events
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_1_database_is_served_after_migration() {
+    let (ann_key, bob_key) = (generate_key(), generate_key());
+    let mut written = Vec::new();
+    let relay = TestRelay::start_with(|cfg| written = write_v1_database(&cfg.db_path, &ann_key, &bob_key)).await;
+
+    // The members of before come back with their keys, to the same workspace.
+    let mut ann = auth(&relay, &ann_key).await.unwrap();
+    let mut bob = auth(&relay, &bob_key).await.unwrap();
+    assert_eq!(ann.ws, V1_WS);
+    assert_eq!(ann.role(), "owner");
+    assert_eq!(ann.ready["head"], json!(7));
+    assert_eq!(ann.ready["settings"], json!({"member_invites": true}));
+
+    // Everyone, a newcomer included, reads everything that was there: the
+    // channels are public, the events are the ones that were signed.
+    let mut newcomer = relay.join(&mut ann, "member", "Cy").await;
+    assert_eq!(newcomer.ready["head"], json!(7));
+    for peer in [&mut ann, &mut bob, &mut newcomer] {
+        let (events, _) = peer.sync_all(0, None).await;
+        assert_eq!(seqs(&events), vec![1, 2, 3, 4, 5, 6, 7]);
+        for (served, original) in events.iter().zip(&written) {
+            assert_eq!(served["id"], json!(original.id));
+            if served["seq"] == json!(4) {
+                assert_eq!(served["redacted"], json!(true));
+                assert!(!served.to_string().contains("pasted by mistake"));
+            } else {
+                let event: Event = serde_json::from_value(served.clone()).unwrap();
+                assert_eq!(verify_event(&event), Ok(()));
+            }
+        }
+        assert_eq!(seqs(&peer.sync_all(0, Some("random")).await.0), vec![2, 4, 5, 7]);
+        for (conv, creator) in [("general", &ann_key), ("random", &bob_key)] {
+            let listed = peer.ask(json!({"t": "conv.members", "conv": conv})).await;
+            assert_eq!(listed["private"], json!(false));
+            assert_eq!(listed["members"].as_array().unwrap().len(), 1);
+            assert_eq!(listed["members"][0]["pubkey"], json!(pubkey_hex(creator)));
+        }
+    }
+
+    // The old rules still hold on the old rows, and the log goes on.
+    assert_eq!(error_code(&bob.publish("msg.edit", json!({"conv": "random", "id": "m2", "msg": {"text": "back"}})).await), "gone");
+    assert_eq!(error_code(&newcomer.publish("msg.post", post("general", "m1", "again")).await), "duplicate_msg");
+    assert_eq!(newcomer.must("msg.post", post("general", "m4", "hello from version 2")).await, 8);
+    assert_eq!(bob.must("msg.edit", json!({"conv": "random", "id": "m3", "msg": {"id": "m3", "text": "edited"}})).await, 9);
+    assert_eq!(seqs(&ann.live_until(9).await), vec![8, 9]);
+
+    // Opening the file again is not a second migration.
+    let conn = rusqlite::Connection::open(&relay.cfg.db_path).unwrap();
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(version, 2);
+    cube_relay::owner_invite(&relay.cfg, 7).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_1_row_with_an_unreadable_body_stops_the_relay_from_starting() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("relay.db");
+    write_v1_database(&db_path, &generate_key(), &generate_key());
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("UPDATE events SET body = '{\"msg\":' WHERE seq = 3", []).unwrap();
+    }
+    let before = std::fs::read(&db_path).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cfg = Config {
+        bind: addr,
+        db_path: db_path.clone(),
+        name: "Test Team".to_string(),
+        public_host: addr.to_string(),
+        trusted_proxies: Vec::new(),
+        limits: Limits::default(),
+    };
+    let error = cube_relay::serve(cfg.clone(), listener, CancellationToken::new()).await.unwrap_err().to_string();
+    assert!(error.contains("from schema version 1 to 2"), "{error}");
+    assert!(error.contains("left unchanged"), "{error}");
+    assert!(error.contains("event 3 (msg.post)"), "{error}");
+    assert!(cube_relay::owner_invite(&cfg, 7).is_err());
+
+    // The binary says the same and exits with a failure.
+    let db = db_path.to_str().unwrap().to_string();
+    let (ok, stdout, stderr) =
+        tokio::task::spawn_blocking(move || run(env!("CARGO_BIN_EXE_cube-relay"), &["owner-invite"], &[("CUBE_RELAY_DB", &db)]))
+            .await
+            .unwrap();
+    assert!(!ok);
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("event 3 (msg.post)"), "{stderr}");
+
+    // Nothing was written: the rows, the tables and the version are as they were.
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(version, 0);
+    let new_table: bool = conn
+        .query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'conv_members')", [], |r| r.get(0))
+        .unwrap();
+    assert!(!new_table);
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 7);
+    drop(conn);
+    assert_eq!(std::fs::read(&db_path).unwrap().len(), before.len());
 }
 
 // ---- the binaries --------------------------------------------------------------------
@@ -1381,4 +1972,95 @@ async fn cube_peer_round_trip() {
     let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, vec!["conv.put", "msg.post", "msg.edit", "msg.delete"]);
     assert!(events[1]["body"].as_str().unwrap().contains("hello from bea"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cube_peer_private_channels() {
+    let relay = TestRelay::start().await;
+    let link = cube_relay::owner_invite(&relay.cfg, 7).unwrap();
+    let (url, host) = (relay.url(), relay.host.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let key_file = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    let (ann_key, bea_key, cy_key) = (key_file("ann.key"), key_file("bea.key"), key_file("cy.key"));
+
+    tokio::task::spawn_blocking(move || {
+        let peer = env!("CARGO_BIN_EXE_cube-peer");
+        // Every line of output is one JSON object; the last one is the command's result.
+        let lines = |args: &[&str]| -> Vec<Value> {
+            let (ok, stdout, stderr) = run(peer, args, &[]);
+            let lines: Vec<Value> = stdout
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap_or_else(|_| panic!("{line} {stderr}")))
+                .collect();
+            assert_eq!(lines.last().unwrap()["ok"], json!(ok), "{stdout}");
+            lines
+        };
+        let as_peer = |key: &str, args: &[&str]| {
+            let mut out = lines(&[&["--key", key, "--relay", url.as_str(), "--host", host.as_str()][..], args].concat());
+            let result = out.pop().unwrap();
+            (out, result)
+        };
+        let ann = |args: &[&str]| as_peer(&ann_key, args).1;
+        let bea = |args: &[&str]| as_peer(&bea_key, args).1;
+        let cy = |args: &[&str]| as_peer(&cy_key, args).1;
+        let join = |key: &str, link: &str, name: &str| lines(&["--key", key, "join", link, "--name", name]).pop().unwrap();
+
+        let joined = join(&ann_key, &link, "Ann");
+        assert_eq!(joined["features"], json!(["channels"]));
+        assert_eq!(joined["settings"], json!({"member_invites": true}));
+        let ann_pk = joined["you"]["pubkey"].as_str().unwrap().to_string();
+
+        // A private channel, made and written in by Ann.
+        assert_eq!(ann(&["conv", "plans", "Plans", "--private"])["seq"], json!(1));
+        assert_eq!(ann(&["post", "plans", "the plan"])["seq"], json!(2));
+
+        // Bea joins the team and sees nothing of it.
+        let invite = ann(&["invite"]);
+        let joined = join(&bea_key, invite["link"].as_str().unwrap(), "Bea");
+        let bea_pk = joined["you"]["pubkey"].as_str().unwrap().to_string();
+        let status = bea(&["status"]);
+        assert_eq!((status["head"].clone(), status["you"]["role"].clone()), (json!(0), json!("member")));
+        assert_eq!(status["features"], json!(["channels"]));
+        assert_eq!(bea(&["sync"]), json!({"ok": true, "events": 0, "next": 0}));
+        assert_eq!(bea(&["post", "plans", "hello?"])["code"], json!("no_conv"));
+        assert_eq!(bea(&["members", "plans"])["code"], json!("no_conv"));
+        assert_eq!(bea(&["add", "plans", &bea_pk])["code"], json!("no_conv"));
+
+        // Ann adds her: the channel's history is there from the start.
+        let added = ann(&["add", "plans", &bea_pk]);
+        assert_eq!((added["seq"].clone(), added["kind"].clone()), (json!(3), json!("conv.add")));
+        let (events, result) = as_peer(&bea_key, &["sync", "--conv", "plans"]);
+        assert_eq!(result, json!({"ok": true, "events": 3, "next": 3, "conv": "plans"}));
+        let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["conv.put", "msg.post", "conv.add"]);
+        assert!(events.iter().all(|e| e["t"] == json!("event")));
+        let members = bea(&["members", "plans"]);
+        assert_eq!(members["private"], json!(true));
+        let in_it: Vec<&str> = members["members"].as_array().unwrap().iter().map(|m| m["pubkey"].as_str().unwrap()).collect();
+        assert_eq!(in_it, vec![ann_pk.as_str(), bea_pk.as_str()]);
+
+        // A member's invite to the channel puts the newcomer in it.
+        assert_eq!(bea(&["invite"])["code"], json!("forbidden"));
+        let invite = bea(&["invite", "--conv", "plans"]);
+        assert_eq!(invite["conv"], json!("plans"));
+        let joined = join(&cy_key, invite["link"].as_str().unwrap(), "Cy");
+        assert_eq!(joined["head"], json!(3));
+        assert_eq!(cy(&["post", "plans", "glad to be here"])["seq"], json!(4));
+
+        // Ann takes Bea out: Bea is left with the removal alone.
+        let removed = ann(&["remove", "plans", &bea_pk]);
+        assert_eq!((removed["seq"].clone(), removed["kind"].clone()), (json!(5), json!("conv.remove")));
+        let (events, result) = as_peer(&bea_key, &["sync", "--after", "0"]);
+        assert_eq!(result, json!({"ok": true, "events": 1, "next": 5}));
+        assert_eq!((events[0]["seq"].clone(), events[0]["kind"].clone()), (json!(5), json!("conv.remove")));
+        assert_eq!(bea(&["sync", "--conv", "plans"]), json!({"ok": true, "events": 0, "next": 5, "conv": "plans"}));
+
+        // The setting is the owner's.
+        assert_eq!(cy(&["settings", "--member-invites", "false"])["code"], json!("forbidden"));
+        assert_eq!(ann(&["settings", "--member-invites", "false"]), json!({"ok": true, "member_invites": false}));
+        assert_eq!(cy(&["status"])["settings"], json!({"member_invites": false}));
+        assert_eq!(cy(&["invite", "--conv", "plans"])["code"], json!("forbidden"));
+    })
+    .await
+    .unwrap();
 }

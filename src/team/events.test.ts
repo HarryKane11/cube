@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Msg } from "@/state/store";
-import { applyEvent, inviteLink, nameOf, postBody, shareable, withoutImages, type TeamEvent, type TeamMember } from "./events";
+import { applyEvent, dmId, dmPeer, inviteLink, nameOf, postBody, shareable, withoutImages, type TeamEvent, type TeamMember } from "./events";
 
 const ME = "aa".repeat(32);
 const BEA = "bb".repeat(32);
@@ -16,8 +16,17 @@ const mine: Msg = { id: "m2", convId: "team-s1", author: "you", text: "mine", ts
 
 describe("applyEvent", () => {
   it("opens a channel a teammate shared, and renames one we already have", () => {
-    expect(applyEvent(ev("conv.put", { conv: "S9", name: "launch" }), world())).toEqual({ t: "conv", sharedId: "S9", name: "launch" });
+    expect(applyEvent(ev("conv.put", { conv: "S9", name: "launch" }), world())).toEqual({ t: "conv", sharedId: "S9", name: "launch", private: false });
+    expect(applyEvent(ev("conv.put", { conv: "S8", name: "hiring", private: true }), world())).toEqual({ t: "conv", sharedId: "S8", name: "hiring", private: true });
     expect(applyEvent(ev("conv.put", { conv: "S1", name: "renamed" }), world())).toEqual({ t: "rename", convId: "team-s1", name: "renamed" });
+  });
+
+  it("tells who was added to a channel and who left it", () => {
+    expect(applyEvent(ev("conv.add", { conv: "S8", member: ME }), world())).toEqual({ t: "joined", sharedId: "S8", member: ME });
+    expect(applyEvent(ev("conv.remove", { conv: "S1", member: CY }), world())).toEqual({ t: "parted", sharedId: "S1", member: CY });
+    // A member that is not a key is not anyone.
+    expect(applyEvent(ev("conv.add", { conv: "S8", member: "Bea" }), world())).toBeNull();
+    expect(applyEvent(ev("conv.add", { conv: "S8" }), world())).toBeNull();
   });
 
   it("adds a teammate's message, marked as theirs, and their agent's with the agent named", () => {
@@ -104,5 +113,24 @@ describe("what goes out", () => {
   it("writes invite links with the token after the hash, over TLS unless the relay is on this machine", () => {
     expect(inviteLink("relay.example.com", "tok")).toBe("cube+wss://relay.example.com/#invite=tok");
     expect(inviteLink("127.0.0.1:8484", "tok")).toBe("cube+ws://127.0.0.1:8484/#invite=tok");
+  });
+});
+
+describe("a direct conversation between two people", () => {
+  it("has one id, whoever starts it", () => {
+    expect(dmId(ME, BEA)).toBe(dmId(BEA, ME));
+    expect(dmId(ME, BEA)).toBe(`dm.${ME.slice(0, 20)}.${BEA.slice(0, 20)}`);
+    expect(dmId(ME, BEA)).not.toBe(dmId(ME, CY));
+  });
+  it("names the teammate on the other side", () => {
+    expect(dmPeer(dmId(ME, BEA), ME, members)?.name).toBe("Bea");
+    expect(dmPeer(dmId(CY, ME), ME, members)?.name).toBe("Cy");
+  });
+  it("is not one when it is between other people, with a stranger, or malformed", () => {
+    expect(dmPeer(dmId(BEA, CY), ME, members)).toBeUndefined();
+    expect(dmPeer(dmId(ME, "dd".repeat(32)), ME, members)).toBeUndefined();
+    expect(dmPeer(`${dmId(ME, BEA)}.x`, ME, members)).toBeUndefined();
+    expect(dmPeer("dm.aa.bb", ME, members)).toBeUndefined();
+    expect(dmPeer("S1", ME, members)).toBeUndefined();
   });
 });

@@ -71,6 +71,22 @@ $PEER --key ann.key $RELAY delete general <msg_id>
 (In zsh, `$PEER` and `$RELAY` are not split into words; write the arguments out or use
 `${=PEER}` / `${=RELAY}`.)
 
+Private channels, their member lists and what a member is served:
+
+```sh
+$PEER --key ann.key $RELAY conv plans Plans --private     # a channel only its members can read
+$PEER --key ann.key $RELAY add plans <bea's pubkey>       # publishes conv.add
+$PEER --key bea.key $RELAY sync --conv plans              # that channel from the start, then {"next":…}
+$PEER --key bea.key $RELAY members plans                  # who is in it
+$PEER --key bea.key $RELAY invite --conv plans            # an invite that puts the claimer in it
+$PEER --key ann.key $RELAY remove plans <bea's pubkey>    # publishes conv.remove (or leave: your own key)
+$PEER --key bea.key $RELAY sync                           # everything bea is served; --after <seq> to continue
+$PEER --key bea.key $RELAY status                         # you, members, head, features, settings
+$PEER --key ann.key $RELAY settings --member-invites false   # owner only
+```
+
+A public key is printed as `you.pubkey` by `join` and `status`.
+
 Other options: `invite --role admin` (owner only), `listen --from <seq>` (replay history after
 `seq` first; `0` for everything), `--host` may be left out when it equals the host in `--relay`.
 `cube-peer` verifies every event it prints and drops, with a note on stderr, any that fail. Like
@@ -135,19 +151,23 @@ docker exec cube-relay cube-relay owner-invite
 ## Deploying on Railway
 
 Railway runs the image, gives it an HTTPS address and keeps the database on a volume, so no
-server or domain of your own is needed. `Dockerfile.railway` and `railway.json` are for this.
+server or domain of your own is needed. `Dockerfile.railway` is for this. The build and health
+check are set in the service's settings: Railway has deprecated its config file
+(`railway.json`) and does not apply one to a new service.
 
 1. Put the repository on GitHub and, in Railway, make a project with **Deploy from GitHub repo**.
    (Or install the Railway CLI, run `railway login`, and in this directory `railway init` and
    `railway up`.)
-2. In the service's **Settings**: set **Root Directory** to `relay`, and the Railway config file
-   to `/relay/railway.json` (the config path does not follow the root directory).
+2. In the service's **Settings**: set **Root Directory** to `relay`, the builder to Dockerfile
+   with the path `Dockerfile.railway` (the service variable
+   `RAILWAY_DOCKERFILE_PATH=Dockerfile.railway` does the same), and the health check path to
+   `/healthz`.
 3. Attach a **volume** to the service with the mount path `/data`. Without it the database is
    lost on every deploy.
 4. Under **Networking**, generate a public domain.
 5. Under **Variables**, set `CUBE_RELAY_PUBLIC_HOST` to `${{RAILWAY_PUBLIC_DOMAIN}}` and
    `CUBE_RELAY_NAME` to your team's name. The relay refuses to start without the first.
-6. Deploy. `https://<your domain>/healthz` answers `ok`.
+6. Deploy. `https://<your domain>/healthz` answers `ok`, and `/ws` accepts a WebSocket.
 7. Make the owner invite inside the running service: copy the service's SSH command from the
    dashboard (or `railway ssh`), and in that shell run `cube-relay owner-invite`. Paste the link
    it prints into Cube under Settings > People.

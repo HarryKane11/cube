@@ -22,7 +22,10 @@ export interface TeamEvent {
 }
 
 export type Change =
-  | { t: "conv"; sharedId: string; name: string }
+  | { t: "conv"; sharedId: string; name: string; private: boolean }
+  /** Someone was added to a channel, or left it or was taken out. `member` is their key. */
+  | { t: "joined"; sharedId: string; member: string }
+  | { t: "parted"; sharedId: string; member: string }
   | { t: "rename"; convId: string; name: string }
   | { t: "add"; msg: Msg }
   | { t: "edit"; id: string; text: string }
@@ -82,7 +85,13 @@ export function applyEvent(e: TeamEvent, ctx: Ctx): Change | null {
   if (e.kind === "conv.put") {
     const name = str(body.name);
     if (!name) return null;
-    return convId ? { t: "rename", convId, name } : { t: "conv", sharedId, name };
+    return convId ? { t: "rename", convId, name } : { t: "conv", sharedId, name, private: body.private === true };
+  }
+  // Who may add or remove whom is the relay's to enforce: it only delivers these to people who can read the channel.
+  if (e.kind === "conv.add" || e.kind === "conv.remove") {
+    const member = str(body.member, 128);
+    if (!member || !/^[0-9a-f]{64}$/.test(member)) return null;
+    return { t: e.kind === "conv.add" ? "joined" : "parted", sharedId, member };
   }
   if (!convId) return null;
   const from = (agent?: string) => ({ pubkey: e.pubkey, name: nameOf(e.pubkey, ctx.members), ...(agent ? { agent } : {}) });
@@ -128,4 +137,23 @@ export function postBody(sharedId: string, id: string, text: string, first: bool
 export function inviteLink(host: string, token: string): string {
   const local = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host);
   return `cube+${local ? "ws" : "wss"}://${host}/#invite=${token}`;
+}
+
+/** The relay id of the direct conversation between two people. Both sides arrive at the same one. */
+export function dmId(a: string, b: string): string {
+  const [x, y] = [a, b].sort();
+  return `dm.${x.slice(0, 20)}.${y.slice(0, 20)}`;
+}
+
+/**
+ * The teammate a direct conversation is with, read from its id: the member whose key matches
+ * the half that is not ours. Undefined for an id that is not one between this person and a member.
+ */
+export function dmPeer(sharedId: string, me: string, members: TeamMember[]): TeamMember | undefined {
+  const [tag, x, y, more] = sharedId.split(".");
+  if (tag !== "dm" || !x || !y || more !== undefined || !me) return undefined;
+  const other = me.startsWith(x) ? y : me.startsWith(y) ? x : undefined;
+  if (!other || other.length !== 20) return undefined;
+  const found = members.filter((m) => m.pubkey !== me && m.pubkey.startsWith(other));
+  return found.length === 1 ? found[0] : undefined;
 }
