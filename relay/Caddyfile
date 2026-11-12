@@ -1,0 +1,16 @@
+# Caddy terminates TLS for the relay and gets its certificate on its own.
+# RELAY_DOMAIN comes from docker-compose.yml (e.g. relay.example.com).
+#
+# Caddy sets X-Forwarded-For to the address it saw and drops whatever the
+# client sent, which is what CUBE_RELAY_TRUSTED_PROXY relies on. Do not add
+# `trusted_proxies` here unless another proxy really sits in front of Caddy.
+# Access logging is off by default; leave it off.
+{$RELAY_DOMAIN} {
+	@relay path /ws /healthz
+	handle @relay {
+		reverse_proxy relay:8484
+	}
+	handle {
+		respond 404
+	}
+}

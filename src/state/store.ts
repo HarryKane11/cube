@@ -1,0 +1,766 @@
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import type { Manifest } from "../agents/custom";
+import type { RemoteAgent } from "../agents/remote/a2a";
+import type { HeadlessEngine } from "../agents/headless";
+import type { JobKind, JobRun } from "../knowledge/jobs";
+import type { TeamMember } from "../team/events";
+import type { Decision, Note, PlanStep } from "../agents/notes";
+import type { Question } from "../agents/permissions";
+import type { Branch } from "../agents/trees";
+import type { ActKind, AgentKind, Mode, Palette, RunOpts, Status, Trust } from "../agents/types";
+import { AGENTS, ORCH, ROUTER, applyPalettes, isLeadRole } from "../agents/types";
+import type { Lang } from "../i18n";
+import { kindOf, type FileKind } from "../lib/files";
+import type { Schedule } from "../lib/schedule";
+import type { Baseline } from "../lib/tree";
+
+/** A channel with several agents, or a direct message with one. Each has its own folder on disk. */
+export interface Conv {
+  id: string;
+  kind: "channel" | "dm";
+  name: string;
+  /** Agent ids. A DM has exactly one. */
+  members: string[];
+  dir: string;
+  createdAt: number;
+  /** Shared with the team: its id on the relay, and since when what is said here goes out. */
+  shared?: { id: string; since: number };
+}
+
+export interface Act {
+  kind: ActKind;
+  label: string;
+}
+
+/** Something an agent wants to do that needs the person's OK. */
+export interface Ask {
+  id: string;
+  title: string;
+  detail: string;
+  /** Wording of the lasting rule the person can give instead of a single OK, when there is one. */
+  always?: string;
+  /** Set when the agent is not asking for an OK but asking the person something. */
+  questions?: Question[];
+  /** Set when the agent finished planning and asks to start: the plan, as markdown. */
+  plan?: string;
+  /** What the person answered, once they did. */
+  answer?: string;
+  /** "gone": the run ended before anyone answered. */
+  state: "waiting" | "allowed" | "denied" | "gone";
+}
+
+export interface Msg {
+  id: string;
+  convId: string;
+  /** "you" or an agent id. */
+  author: string;
+  text: string;
+  ts: number;
+  /** Set on replies; points at the thread's first message. */
+  parentId?: string;
+  streaming?: boolean;
+  /** The person sent this while agents were working, which stopped them. */
+  stepped?: boolean;
+  stopped?: boolean;
+  /** Nobody was named, so Cube picked this agent from what the request said. */
+  auto?: boolean;
+  error?: string;
+  /** What the agent did while writing this, in order. */
+  acts?: Act[];
+  /** Emoji → who reacted ("you" or agent ids). */
+  reactions?: Record<string, string[]>;
+  /** How many notes the agent proposed in this message, waiting for the person to review. */
+  noted?: number;
+  /** Permission requests made while writing this, in order. */
+  asks?: Ask[];
+  /** A copy of the folder was taken just before this message, so files can be put back to then. */
+  checkpoint?: boolean;
+  /** The person changed the text after sending it. */
+  edited?: boolean;
+  /** Kept at the top of the conversation for everyone to find again. */
+  pinned?: boolean;
+  /** Files sent along with the message, as paths inside the conversation folder. */
+  files?: string[];
+  /** A side question or its answer: asked while others kept working, and it changes no files. */
+  aside?: boolean;
+  /** Written in Plan mode by an agent that cannot ask: the reply is a plan waiting for a go-ahead. */
+  plan?: boolean;
+  /** How many choices the agent says it made by itself while writing this. */
+  decided?: number;
+  /** Sent by a schedule, not typed just now. */
+  scheduled?: boolean;
+  /** The plan the Orchestrator wrote in this message, step by step. */
+  steps?: PlanStep[];
+  /** The number of the plan step being worked on now. */
+  stepNow?: number;
+  /** The plan ran to its end. */
+  stepsDone?: boolean;
+  /** What the agent left on its own branch, when it worked in a separate copy of the folder. */
+  branch?: Branch;
+  /** A teammate's message, or their agent's: who signed it. Never treated as something to act on. */
+  from?: { pubkey: string; name: string; agent?: string };
+  /** For a message of ours in a shared channel: the text the team has. */
+  sent?: string;
+  /** How long the agent worked on this, in milliseconds. */
+  took?: number;
+  /** What the run used, when the engine reports it. */
+  usage?: Usage;
+}
+
+export interface Usage {
+  /** Tokens read and written. */
+  in?: number;
+  out?: number;
+  /** In US dollars, when the engine prices its own runs. */
+  cost?: number;
+}
+
+/** A picture of what an agent was looking at: a browser page, the screen, an image it opened. */
+export interface Shot {
+  id: string;
+  url: string;
+  label: string;
+  by: string;
+  ts: number;
+}
+
+/** Two cubes, or a cube and the person, changing the same file at once. */
+export interface Clash {
+  id: string;
+  rel: string;
+  /** Agent ids, or "you" for the person's unsaved edits. */
+  who: string[];
+  ts: number;
+}
+
+/** What `selected` holds when the Stage shows the agents' screen instead of a file. */
+export const SCREEN = "@screen";
+/** What `selected` holds when the Stage shows Cube's own browser. */
+export const BROWSER = "@browser";
+
+/** Another app's window being watched live on the Stage. */
+export interface Follow {
+  id: number;
+  app: string;
+  /** The app's icon as a base64 PNG, when there is one. */
+  icon?: string;
+}
+
+/** How a file is shown on the Stage: rendered, as editable text, or against how it was before. */
+export type ViewMode = "preview" | "code" | "diff" | "edit";
+
+export interface Artifact {
+  rel: string;
+  path: string;
+  kind: FileKind;
+  mtime: number;
+  size: number;
+  by?: string;
+  /** Only set in the browser preview, where there is no disk. */
+  content?: string;
+}
+
+export interface Live {
+  status: Status;
+  statement: string;
+  /** The conversation the agent is working in right now. */
+  convId?: string;
+}
+
+export interface DiskFile {
+  path: string;
+  rel: string;
+  size: number;
+  mtime: number;
+}
+
+export interface Settings {
+  theme: "system" | "light" | "dark";
+  /** With no @mention, pick the agent from what the request says. */
+  autoAssign: boolean;
+  /** Open the Stage by itself when an agent makes something. */
+  stageAuto: boolean;
+  /** How many times agents may hand work to each other before a person has to speak again. */
+  maxHops: number;
+  /** Keep cubes still instead of twisting while they work. */
+  calm: boolean;
+  /** Show the file tree beside whatever is on the Stage. */
+  tree: boolean;
+  /** Show the full sidebar. Off: a narrow rail of icons. */
+  sidebar: boolean;
+  /** The mode a conversation uses until the person picks one for it. */
+  mode: Mode;
+  /** Widths, in px, of the sidebar, of the conversation when something is open beside it, and of the Stage's file list. */
+  sidebarW: number;
+  chatW: number;
+  treeW: number;
+  /** The language of the app's own words. What cubes and people write is left as it is. */
+  lang: Lang;
+  /** Ids of the typefaces for Latin text and for Hangul. See lib/fonts.ts. */
+  fontEn: string;
+  fontKo: string;
+  /** Tell the person through the system when a cube needs them or finishes while Cube is in the background. */
+  notify: boolean;
+}
+
+/** How Cube keeps its memory, skills and wiki. */
+export interface KnowledgeState {
+  /** The agent program background work runs on. Empty until the person picks one; nothing runs by itself before that. */
+  engine: "" | HeadlessEngine;
+  model: string;
+  /** Keep memory, skills and the wiki up to date without being asked. */
+  auto: boolean;
+  /** When each job last finished well. */
+  last: Partial<Record<JobKind, number>>;
+  /** The time of the last conversation line each job has read. */
+  cursor: { memory: number; skills: number };
+  /** When memory last changed, which is what gives the wiki something to do. */
+  memoryChangedAt: number;
+  /** Notes brought in from other programs are waiting to be worked into memory. */
+  imported: boolean;
+  /** The latest runs, newest first. */
+  runs: JobRun[];
+}
+
+interface CubeState {
+  settings: Settings;
+  /** Per conversation, whether the person opened or closed the Stage by hand. Unset: follow the files. */
+  stage: Record<string, "open" | "closed">;
+  /** The person's display name. Empty until they finish the start screen. */
+  name: string;
+  onboarded: boolean;
+  /** Which engines are installed on this computer. */
+  available: Partial<Record<AgentKind, boolean>>;
+  /** Role id → the engine that powers it. */
+  engines: Record<string, AgentKind>;
+  /** `${agentId}:${engine}` → the model and effort that role uses on that engine. */
+  models: Record<string, { model?: string; effort?: string }>;
+  /** Role ids that run without the person's own setup for their engine. */
+  plain: Record<string, boolean>;
+  /** Conversation id → the mode picked for it in the message box. */
+  modes: Record<string, Mode>;
+  /** Conversation id → the mode it was in before Plan, to go back to once a plan is approved. */
+  planFrom: Record<string, Mode>;
+  /** Role id → how much it may do without asking. Unset: "edits". */
+  trust: Record<string, Trust>;
+  /** Role id → things the person said it may always do. See agents/permissions.ts for the rule format. */
+  allow: Record<string, string[]>;
+  /** What agents learned, proposed and approved. */
+  notes: Note[];
+  /** Session key → ids of the notes that session has already been told. */
+  told: Record<string, string[]>;
+  /** Per conversation, the latest pictures of what agents were looking at. Not saved. */
+  shots: Record<string, Shot[]>;
+  /** Per conversation, the app window the Screen tab is following. Not saved. */
+  follow: Record<string, Follow | undefined>;
+  /** The system refused a picture of another app's window. Until one works, Cube does not try by itself again. Not saved. */
+  captureDenied: boolean;
+  /** The port Cube's own browser listens on, once it is running. Not saved. */
+  browserPort?: number;
+  view: "home" | "conv" | "settings" | "agent" | "inbox" | "library";
+  /** A message the conversation should scroll to and flash. `n` changes on every jump, so the same message can be found twice. */
+  focus?: { id: string; n: number };
+  /** Choices agents made by themselves, for the person to look over. */
+  decisions: Decision[];
+  /** Inbox entries the person cleared, by entry id. */
+  cleared: Record<string, boolean>;
+  /** Role id → the three face colors the person picked for its cube: front, top, side. */
+  palettes: Record<string, Palette>;
+  /** Programs of the person's own found in ~/CubeSpaces/.agents. Not saved: read again at every start. */
+  customs: Manifest[];
+  /** Role id → the custom agent that powers it, when the role runs on one. */
+  customFor: Record<string, string>;
+  /** The team this Cube has joined, as the relay last described it. */
+  team: { info?: { host: string; ws: string; workspace: string; pubkey: string }; me?: { name: string; role: TeamMember["role"] }; members: TeamMember[]; head: number };
+  /** The connection to the relay right now. Not kept across restarts. */
+  teamLive: { connected: boolean; problem: string; invite?: string };
+  /** How Cube keeps its memory, skills and wiki, and what the background jobs have done. */
+  knowledge: KnowledgeState;
+  /** The job running right now, if one is. Not kept across restarts. */
+  knowledgeBusy?: { job: JobKind; since: number; activity: string };
+  /** Where the knowledge folder is, and how many notes, skills and pages it holds. */
+  knowledgeDir: string;
+  knowledgeCount: number;
+  /** Agents that run somewhere else, added by the person. Their credentials are in the Keychain, not here. */
+  remotes: RemoteAgent[];
+  /** Role id → the remote agent that powers it, when the role runs on one. */
+  remoteFor: Record<string, string>;
+  /** Channels where each cube works in its own copy of the folder (a git worktree). */
+  trees: Record<string, boolean>;
+  /** Messages Cube sends by itself at set times. */
+  schedules: Schedule[];
+  /** When the person last left Cube. What happened since is what they missed. */
+  seenAt: number;
+  /** Per conversation, files being changed from two sides right now. Not saved. */
+  clashes: Record<string, Clash[]>;
+  /** The role whose profile is open. */
+  profileId?: string;
+  convs: Conv[];
+  activeId: string;
+  messages: Msg[];
+  /** `${convId}:${agentId}:${engine}` → that agent's own session id, so it keeps its memory between turns. */
+  sessions: Record<string, string>;
+  /** `${convId}:${rel}` → the agent that last wrote the file. */
+  authors: Record<string, string>;
+  live: Record<string, Live>;
+  files: Record<string, Artifact[]>;
+  selected: Record<string, string | undefined>;
+  /** The person picked a file by hand, so new files should not steal the Stage. */
+  pinned: Record<string, boolean>;
+  /** Per conversation, the files open as tabs on the Stage, in the order they were opened. */
+  tabs: Record<string, string[]>;
+  /** `${convId}:${rel}` → how the person chose to look at that file. Unset: whatever suits its kind. */
+  mode: Record<string, ViewMode>;
+  /** Absolute paths of files with edits not saved yet. */
+  dirty: Record<string, boolean>;
+  /** Per conversation, how its files looked when the person last spoke. */
+  baseline: Record<string, Baseline>;
+  /** Text waiting to be dropped into a conversation's message box, e.g. code picked in the editor. */
+  quote?: { convId: string; text: string };
+  /** A place the editor should jump to once that file is open. */
+  reveal?: { path: string; line: number; col: number };
+  /** Conversations whose terminal panel is open. */
+  termOpen: Record<string, boolean>;
+  /** Per conversation, the checkpoint that takes back the last restore. */
+  undo: Record<string, { id: string; label: string } | undefined>;
+  unread: Record<string, number>;
+  /** Root message of the thread open in the side panel. */
+  threadId?: string;
+  setSetting<K extends keyof Settings>(key: K, value: Settings[K]): void;
+  setStage(convId: string, value: "open" | "closed"): void;
+  openSettings(): void;
+  openInbox(): void;
+  openLibrary(): void;
+  /** Opens the conversation a message is in and brings the message into view. */
+  jumpTo(msgId: string): void;
+  addDecision(d: Decision): void;
+  setDecision(id: string, state: Decision["state"]): void;
+  clearEntry(id: string): void;
+  /** Sets a role's cube colors, or puts its own colors back. */
+  setPalette(agentId: string, colors: Palette | undefined): void;
+  setCustoms(list: Manifest[]): void;
+  setCustomFor(agentId: string, id: string): void;
+  setTeam(patch: Partial<CubeState["team"]>): void;
+  setTeamLive(patch: Partial<CubeState["teamLive"]>): void;
+  setConvShared(convId: string, shared: Conv["shared"]): void;
+  renameConv(convId: string, name: string): void;
+  setKnowledge(patch: Partial<KnowledgeState>): void;
+  setKnowledgeBusy(busy: { job: JobKind; since: number; activity: string } | undefined): void;
+  setKnowledgePlace(dir: string, count: number): void;
+  addKnowledgeRun(run: JobRun): void;
+  putRemote(agent: RemoteAgent): void;
+  removeRemote(id: string): void;
+  setRemoteFor(agentId: string, id: string): void;
+  setTrees(convId: string, on: boolean): void;
+  saveSchedule(s: Schedule): void;
+  removeSchedule(id: string): void;
+  setSeen(ts: number): void;
+  addClash(convId: string, clash: Clash): void;
+  dropClash(convId: string, id?: string): void;
+  /** Forgets every message and agent session. Channels and files on disk stay. */
+  clearHistory(): void;
+  restartOnboarding(): void;
+  setName(name: string): void;
+  finishOnboarding(): void;
+  setAvailable(a: Partial<Record<AgentKind, boolean>>): void;
+  setEngine(agentId: string, kind: AgentKind): void;
+  setModel(agentId: string, kind: AgentKind, patch: Pick<RunOpts, "model" | "effort">): void;
+  setPlain(agentId: string, plain: boolean): void;
+  setTrust(agentId: string, trust: Trust): void;
+  setConvMode(convId: string, mode: Mode): void;
+  addRule(agentId: string, rule: string): void;
+  removeRule(agentId: string, rule: string): void;
+  patchAsk(msgId: string, askId: string, state: Ask["state"], answer?: string): void;
+  openProfile(agentId: string): void;
+  addNote(note: Note): void;
+  keepNote(id: string): void;
+  forgetNote(id: string): void;
+  markTold(key: string, ids: string[]): void;
+  addShot(convId: string, shot: Shot): void;
+  /** Starts or stops following a window. Starting brings the Screen tab up unless the person pinned a file. */
+  setFollow(convId: string, follow: Follow | undefined): void;
+  setBrowserPort(port: number | undefined): void;
+  setCaptureDenied(denied: boolean): void;
+  goHome(): void;
+  setActive(id: string): void;
+  addConv(conv: Conv): void;
+  setConvDir(id: string, dir: string): void;
+  addMsg(msg: Msg): void;
+  patchMsg(id: string, patch: Partial<Msg> | ((m: Msg) => Partial<Msg>)): void;
+  deleteMsg(id: string): void;
+  react(id: string, emoji: string, who: string, on?: boolean): void;
+  setLive(agentId: string, patch: Partial<Live>): void;
+  setSession(key: string, id: string): void;
+  syncFiles(convId: string, files: DiskFile[], authorOf: (f: DiskFile) => string | undefined): void;
+  putArtifact(convId: string, a: Artifact): void;
+  select(convId: string, rel: string | undefined, pinned: boolean): void;
+  closeTab(convId: string, rel: string): void;
+  setMode(convId: string, rel: string, mode: ViewMode): void;
+  setDirty(path: string, dirty: boolean): void;
+  setBaseline(convId: string, baseline: Baseline): void;
+  /** Notes that a file is back to its baseline text, under a new modified time. */
+  rebaseFile(convId: string, rel: string, mtime: number): void;
+  setQuote(quote: { convId: string; text: string } | undefined): void;
+  setReveal(reveal: { path: string; line: number; col: number } | undefined): void;
+  setTermOpen(convId: string, open: boolean): void;
+  setUndo(convId: string, undo: { id: string; label: string } | undefined): void;
+  openThread(id: string | undefined): void;
+}
+
+const idleLive = (): Record<string, Live> =>
+  Object.fromEntries(AGENTS.map((a) => [a.id, { status: "idle" as Status, statement: "" }]));
+
+const defaultConvs = (): Conv[] => [
+  { id: "general", kind: "channel", name: "general", members: AGENTS.map((a) => a.id), dir: "", createdAt: 0 },
+  // The Router and the Orchestrator have no direct message: alone they have nobody to hand work to.
+  ...AGENTS.filter((a) => !isLeadRole(a.id)).map((a): Conv => ({ id: `dm-${a.id}`, kind: "dm", name: a.name, members: [a.id], dir: "", createdAt: 0 })),
+];
+
+export const useCube = create<CubeState>()(
+  persist(
+    (set) => ({
+      settings: { theme: "system", autoAssign: true, stageAuto: true, maxHops: 4, calm: false, tree: true, sidebar: true, mode: "manual", notify: true, lang: "en", fontEn: "system", fontKo: "system", sidebarW: 244, chatW: 480, treeW: 200 },
+      stage: {},
+      name: "",
+      onboarded: false,
+      available: {},
+      engines: {},
+      models: {},
+      plain: {},
+      modes: {},
+      planFrom: {},
+      trust: {},
+      allow: {},
+      notes: [],
+      told: {},
+      shots: {},
+      follow: {},
+      captureDenied: false,
+      browserPort: undefined,
+      view: "home",
+      focus: undefined,
+      decisions: [],
+      cleared: {},
+      palettes: {},
+      customs: [],
+      customFor: {},
+      remotes: [],
+      remoteFor: {},
+      team: { members: [], head: 0 },
+      teamLive: { connected: false, problem: "" },
+      knowledge: { engine: "", model: "", auto: true, last: {}, cursor: { memory: 0, skills: 0 }, memoryChangedAt: 0, imported: false, runs: [] },
+      knowledgeBusy: undefined,
+      knowledgeDir: "",
+      knowledgeCount: 0,
+      trees: {},
+      schedules: [],
+      seenAt: Date.now(),
+      clashes: {},
+      profileId: undefined,
+      convs: defaultConvs(),
+      activeId: "general",
+      messages: [],
+      sessions: {},
+      authors: {},
+      live: idleLive(),
+      files: {},
+      selected: {},
+      pinned: {},
+      tabs: {},
+      mode: {},
+      dirty: {},
+      baseline: {},
+      quote: undefined,
+      reveal: undefined,
+      termOpen: {},
+      undo: {},
+      unread: {},
+      threadId: undefined,
+      setSetting: (key, value) => set((s) => ({ settings: { ...s.settings, [key]: value } })),
+      setStage: (convId, value) => set((s) => ({ stage: { ...s.stage, [convId]: value } })),
+      openSettings: () => set({ view: "settings", threadId: undefined }),
+      openInbox: () => set({ view: "inbox", threadId: undefined }),
+      openLibrary: () => set({ view: "library", threadId: undefined }),
+      jumpTo: (msgId) =>
+        set((s) => {
+          const m = s.messages.find((x) => x.id === msgId);
+          if (!m) return s;
+          return { view: "conv", activeId: m.convId, threadId: m.parentId, unread: { ...s.unread, [m.convId]: 0 }, focus: { id: msgId, n: (s.focus?.n ?? 0) + 1 } };
+        }),
+      addDecision: (d) => set((s) => ({ decisions: [...s.decisions, d].slice(-300) })),
+      setDecision: (id, state) => set((s) => ({ decisions: s.decisions.map((d) => (d.id === id ? { ...d, state } : d)) })),
+      clearEntry: (id) => set((s) => ({ cleared: { ...s.cleared, [id]: true } })),
+      setPalette: (agentId, colors) =>
+        set((s) => {
+          const palettes = { ...s.palettes };
+          if (colors) palettes[agentId] = colors;
+          else delete palettes[agentId];
+          // Cubes read their colors while they are drawn, so the new ones must be in place first.
+          applyPalettes(palettes);
+          return { palettes };
+        }),
+      setCustoms: (customs) => set({ customs }),
+      setCustomFor: (agentId, id) => set((s) => ({ customFor: { ...s.customFor, [agentId]: id } })),
+      setTeam: (patch) => set((s) => ({ team: { ...s.team, ...patch } })),
+      setTeamLive: (patch) => set((s) => ({ teamLive: { ...s.teamLive, ...patch } })),
+      setConvShared: (convId, shared) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, shared } : c)) })),
+      renameConv: (convId, name) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, name } : c)) })),
+      setKnowledge: (patch) => set((s) => ({ knowledge: { ...s.knowledge, ...patch } })),
+      setKnowledgeBusy: (knowledgeBusy) => set({ knowledgeBusy }),
+      setKnowledgePlace: (knowledgeDir, knowledgeCount) => set({ knowledgeDir, knowledgeCount }),
+      addKnowledgeRun: (run) => set((s) => ({ knowledge: { ...s.knowledge, runs: [run, ...s.knowledge.runs].slice(0, 30) } })),
+      putRemote: (agent) => set((s) => ({ remotes: [...s.remotes.filter((r) => r.id !== agent.id), agent], available: { ...s.available, remote: true } })),
+      removeRemote: (id) =>
+        set((s) => {
+          const remotes = s.remotes.filter((r) => r.id !== id);
+          return { remotes, available: { ...s.available, remote: remotes.length > 0 } };
+        }),
+      setRemoteFor: (agentId, id) => set((s) => ({ remoteFor: { ...s.remoteFor, [agentId]: id } })),
+      setTrees: (convId, on) => set((s) => ({ trees: { ...s.trees, [convId]: on } })),
+      saveSchedule: (next) => set((s) => ({ schedules: s.schedules.some((x) => x.id === next.id) ? s.schedules.map((x) => (x.id === next.id ? next : x)) : [...s.schedules, next] })),
+      removeSchedule: (id) => set((s) => ({ schedules: s.schedules.filter((x) => x.id !== id) })),
+      setSeen: (seenAt) => set({ seenAt }),
+      addClash: (convId, clash) =>
+        set((s) => {
+          const had = s.clashes[convId] ?? [];
+          // One notice per file; a third party joining updates it.
+          const same = had.find((c) => c.rel === clash.rel);
+          const next = same ? had.map((c) => (c === same ? { ...c, who: [...new Set([...c.who, ...clash.who])] } : c)) : [...had, clash];
+          return { clashes: { ...s.clashes, [convId]: next } };
+        }),
+      dropClash: (convId, id) => set((s) => ({ clashes: { ...s.clashes, [convId]: id ? (s.clashes[convId] ?? []).filter((c) => c.id !== id) : [] } })),
+      clearHistory: () => set({ messages: [], sessions: {}, told: {}, shots: {}, unread: {}, decisions: [], cleared: {}, threadId: undefined, live: idleLive() }),
+      restartOnboarding: () => set({ onboarded: false }),
+      setName: (name) => set({ name }),
+      finishOnboarding: () => set({ onboarded: true, view: "home" }),
+      setAvailable: (available) => set({ available }),
+      setEngine: (agentId, kind) => set((s) => ({ engines: { ...s.engines, [agentId]: kind } })),
+      setModel: (agentId, kind, patch) =>
+        set((s) => {
+          const key = `${agentId}:${kind}`;
+          return { models: { ...s.models, [key]: { ...s.models[key], ...patch } } };
+        }),
+      setPlain: (agentId, plain) => set((s) => ({ plain: { ...s.plain, [agentId]: plain } })),
+      setTrust: (agentId, trust) => set((s) => ({ trust: { ...s.trust, [agentId]: trust } })),
+      setConvMode: (convId, mode) =>
+        set((s) => {
+          const was = s.modes[convId] ?? s.settings.mode;
+          return { modes: { ...s.modes, [convId]: mode }, planFrom: mode === "plan" && was !== "plan" ? { ...s.planFrom, [convId]: was } : s.planFrom };
+        }),
+      addRule: (agentId, rule) => set((s) => ({ allow: { ...s.allow, [agentId]: [...new Set([...(s.allow[agentId] ?? []), rule])] } })),
+      removeRule: (agentId, rule) => set((s) => ({ allow: { ...s.allow, [agentId]: (s.allow[agentId] ?? []).filter((r) => r !== rule) } })),
+      patchAsk: (msgId, askId, state, answer) =>
+        set((s) => ({
+          messages: s.messages.map((m) => (m.id === msgId ? { ...m, asks: m.asks?.map((a) => (a.id === askId ? { ...a, state, answer } : a)) } : m)),
+        })),
+      openProfile: (agentId) => set({ view: "agent", profileId: agentId, threadId: undefined }),
+      addNote: (note) => set((s) => (s.notes.some((n) => n.agentId === note.agentId && n.text === note.text) ? s : { notes: [...s.notes, note] })),
+      keepNote: (id) => set((s) => ({ notes: s.notes.map((n) => (n.id === id ? { ...n, state: "kept" as const } : n)) })),
+      forgetNote: (id) => set((s) => ({ notes: s.notes.filter((n) => n.id !== id) })),
+      markTold: (key, ids) => set((s) => ({ told: { ...s.told, [key]: ids } })),
+      addShot: (convId, shot) =>
+        set((s) => ({
+          shots: { ...s.shots, [convId]: [...(s.shots[convId] ?? []), shot].slice(-12) },
+          // The screen takes the Stage unless the person pinned a file there.
+          selected: s.pinned[convId] ? s.selected : { ...s.selected, [convId]: SCREEN },
+          tabs: { ...s.tabs, [convId]: withTab(s.tabs[convId], SCREEN) },
+          stage: s.settings.stageAuto ? { ...s.stage, [convId]: "open" as const } : s.stage,
+        })),
+      setFollow: (convId, follow) =>
+        set((s) => ({
+          follow: { ...s.follow, [convId]: follow },
+          ...(follow
+            ? {
+                selected: s.pinned[convId] ? s.selected : { ...s.selected, [convId]: SCREEN },
+                tabs: { ...s.tabs, [convId]: withTab(s.tabs[convId], SCREEN) },
+                stage: s.settings.stageAuto ? { ...s.stage, [convId]: "open" as const } : s.stage,
+              }
+            : {}),
+        })),
+      setBrowserPort: (browserPort) => set({ browserPort }),
+      setCaptureDenied: (captureDenied) => set((s) => (s.captureDenied === captureDenied ? s : { captureDenied })),
+      goHome: () => set({ view: "home", threadId: undefined }),
+      setActive: (id) => set((s) => ({ view: "conv", activeId: id, threadId: undefined, unread: { ...s.unread, [id]: 0 } })),
+      addConv: (conv) => set((s) => ({ convs: [...s.convs, conv] })),
+      setConvDir: (id, dir) => set((s) => ({ convs: s.convs.map((c) => (c.id === id ? { ...c, dir } : c)) })),
+      addMsg: (msg) =>
+        set((s) => ({
+          messages: [...s.messages, msg],
+          unread:
+            (s.view !== "conv" || msg.convId !== s.activeId) && msg.author !== "you"
+              ? { ...s.unread, [msg.convId]: (s.unread[msg.convId] ?? 0) + 1 }
+              : s.unread,
+        })),
+      patchMsg: (id, patch) =>
+        set((s) => ({
+          messages: s.messages.map((m) => (m.id === id ? { ...m, ...(typeof patch === "function" ? patch(m) : patch) } : m)),
+        })),
+      deleteMsg: (id) =>
+        set((s) => ({
+          messages: s.messages.filter((m) => m.id !== id && m.parentId !== id),
+          threadId: s.threadId === id ? undefined : s.threadId,
+        })),
+      react: (id, emoji, who, on) =>
+        set((s) => ({
+          messages: s.messages.map((m) => {
+            if (m.id !== id) return m;
+            const had = m.reactions?.[emoji] ?? [];
+            const want = on ?? !had.includes(who);
+            const next = want ? [...had.filter((w) => w !== who), who] : had.filter((w) => w !== who);
+            const reactions = { ...(m.reactions ?? {}), [emoji]: next };
+            if (!next.length) delete reactions[emoji];
+            return { ...m, reactions };
+          }),
+        })),
+      setLive: (agentId, patch) =>
+        set((s) => ({ live: { ...s.live, [agentId]: { ...(s.live[agentId] ?? { status: "idle", statement: "" }), ...patch } } })),
+      setSession: (key, id) => set((s) => ({ sessions: { ...s.sessions, [key]: id } })),
+      syncFiles: (convId, files, authorOf) =>
+        set((s) => {
+          const before = s.files[convId] ?? [];
+          const old = new Map(before.map((a) => [a.rel, a]));
+          const authors = { ...s.authors };
+          let newest: Artifact | undefined;
+          const list = files.map((f) => {
+            const prev = old.get(f.rel);
+            const changed = !prev || prev.mtime !== f.mtime;
+            const key = `${convId}:${f.rel}`;
+            const by = (changed ? authorOf(f) : undefined) ?? prev?.by ?? authors[key];
+            if (by) authors[key] = by;
+            const next: Artifact = { rel: f.rel, path: f.path, kind: kindOf(f.rel), mtime: f.mtime, size: f.size, by };
+            if (changed && (!newest || f.mtime > newest.mtime)) newest = next;
+            return next;
+          });
+          list.sort((a, b) => b.mtime - a.mtime);
+          const cur = s.selected[convId];
+          // The browser and the screen are not files: once opened they stay until the person closes them.
+          const shown = (rel: string) => rel === BROWSER || rel === SCREEN || list.some((a) => a.rel === rel);
+          const stillThere = cur && shown(cur);
+          const pick = newest && !s.pinned[convId] ? newest.rel : stillThere ? cur : list[0]?.rel;
+          // Tabs for files that are gone close by themselves; whatever is shown always has a tab.
+          const kept = (s.tabs[convId] ?? []).filter(shown);
+          return {
+            files: { ...s.files, [convId]: list },
+            tabs: { ...s.tabs, [convId]: withTab(kept, pick) },
+            // Something new to show: bring the Stage up, unless the person turned that off.
+            stage: newest && s.settings.stageAuto ? { ...s.stage, [convId]: "open" as const } : s.stage,
+            authors,
+            selected: { ...s.selected, [convId]: pick },
+            pinned: { ...s.pinned, [convId]: stillThere ? (s.pinned[convId] ?? false) : false },
+          };
+        }),
+      putArtifact: (convId, a) =>
+        set((s) => ({
+          files: { ...s.files, [convId]: [a, ...(s.files[convId] ?? []).filter((x) => x.rel !== a.rel)] },
+          selected: s.pinned[convId] ? s.selected : { ...s.selected, [convId]: a.rel },
+          tabs: { ...s.tabs, [convId]: withTab(s.tabs[convId], a.rel) },
+          stage: s.settings.stageAuto ? { ...s.stage, [convId]: "open" as const } : s.stage,
+        })),
+      select: (convId, rel, pinned) =>
+        set((s) => ({
+          selected: { ...s.selected, [convId]: rel },
+          pinned: { ...s.pinned, [convId]: pinned },
+          tabs: { ...s.tabs, [convId]: withTab(s.tabs[convId], rel) },
+        })),
+      closeTab: (convId, rel) =>
+        set((s) => {
+          const before = s.tabs[convId] ?? [];
+          const at = before.indexOf(rel);
+          const tabs = before.filter((t) => t !== rel);
+          // Closing the tab in view moves to its neighbor.
+          const selected = s.selected[convId] === rel ? (tabs[Math.min(at, tabs.length - 1)] ?? undefined) : s.selected[convId];
+          return { tabs: { ...s.tabs, [convId]: tabs }, selected: { ...s.selected, [convId]: selected }, pinned: { ...s.pinned, [convId]: true } };
+        }),
+      setMode: (convId, rel, mode) => set((s) => ({ mode: { ...s.mode, [`${convId}:${rel}`]: mode } })),
+      setDirty: (path, dirty) => set((s) => (Boolean(s.dirty[path]) === dirty ? s : { dirty: { ...s.dirty, [path]: dirty } })),
+      setBaseline: (convId, baseline) => set((s) => ({ baseline: { ...s.baseline, [convId]: baseline } })),
+      rebaseFile: (convId, rel, mtime) =>
+        set((s) => {
+          const base = s.baseline[convId];
+          const was = base?.files[rel];
+          return base && was ? { baseline: { ...s.baseline, [convId]: { ...base, files: { ...base.files, [rel]: { ...was, mtime } } } } } : s;
+        }),
+      setQuote: (quote) => set({ quote }),
+      setReveal: (reveal) => set({ reveal }),
+      setTermOpen: (convId, open) => set((s) => ({ termOpen: { ...s.termOpen, [convId]: open } })),
+      setUndo: (convId, undo) => set((s) => ({ undo: { ...s.undo, [convId]: undo } })),
+      openThread: (id) => set({ threadId: id }),
+    }),
+    {
+      name: "cube-v4",
+      partialize: (s) => ({
+        settings: s.settings,
+        name: s.name,
+        onboarded: s.onboarded,
+        engines: s.engines,
+        models: s.models,
+        plain: s.plain,
+        modes: s.modes,
+        planFrom: s.planFrom,
+        trust: s.trust,
+        allow: s.allow,
+        notes: s.notes,
+        told: s.told,
+        decisions: s.decisions,
+        cleared: s.cleared,
+        palettes: s.palettes,
+        customFor: s.customFor,
+        remotes: s.remotes,
+        knowledge: s.knowledge,
+        team: s.team,
+        remoteFor: s.remoteFor,
+        trees: s.trees,
+        schedules: s.schedules,
+        seenAt: s.seenAt,
+        convs: s.convs.map((c) => ({ ...c, dir: "" })),
+        activeId: s.activeId,
+        messages: s.messages,
+        sessions: s.sessions,
+        authors: s.authors,
+        unread: s.unread,
+      }),
+      merge: (saved, current) => {
+        const p = (saved ?? {}) as Partial<CubeState>;
+        // Channels made before the Router and the Orchestrator existed get them now.
+        const convs = (p.convs?.length ? p.convs : current.convs).map((c) =>
+          c.kind === "channel" ? { ...c, members: [...[ROUTER, ORCH].filter((id) => !c.members.includes(id)), ...c.members] } : c,
+        );
+        applyPalettes(p.palettes ?? {});
+        return {
+          ...current,
+          ...p,
+          settings: { ...current.settings, ...(p.settings ?? {}) },
+          convs,
+          activeId: convs.some((c) => c.id === p.activeId) ? (p.activeId as string) : convs[0].id,
+          // Nothing is running after a restart, so close any message that was mid-stream.
+          messages: (p.messages ?? []).map((m) => {
+            const asks = m.asks?.map((a) => (a.state === "waiting" ? { ...a, state: "gone" as const } : a));
+            return m.streaming ? { ...m, asks, streaming: false, stopped: true } : { ...m, asks };
+          }),
+        };
+      },
+    },
+  ),
+);
+
+function withTab(tabs: string[] | undefined, rel: string | undefined): string[] {
+  const list = tabs ?? [];
+  return !rel || list.includes(rel) ? list : [...list, rel];
+}
+
+export function useActiveConv(): Conv {
+  return useCube((s) => s.convs.find((c) => c.id === s.activeId) ?? s.convs[0]);
+}
+
+/** True while any agent is working in the given conversation. */
+export function useBusy(convId: string): boolean {
+  return useCube((s) =>
+    Object.values(s.live).some((l) => l.convId === convId && (l.status === "thinking" || l.status === "working")),
+  );
+}
+
+/** The Stage is open when the person opened it, or when there is something to show and they did not close it. */
+export function useStageOpen(convId: string): boolean {
+  return useCube((s) => (s.stage[convId] ? s.stage[convId] === "open" : (s.files[convId]?.length ?? 0) + (s.shots[convId]?.length ?? 0) > 0 || Boolean(s.follow[convId])));
+}

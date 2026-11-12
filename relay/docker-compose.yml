@@ -1,0 +1,64 @@
+# Example: cube-relay behind Caddy, which terminates TLS.
+#
+#   RELAY_DOMAIN=relay.example.com docker compose up -d --build
+#   docker compose exec relay cube-relay owner-invite
+#
+# RELAY_DOMAIN must resolve to this machine, and ports 80 and 443 must be
+# reachable from the internet so Caddy can get a certificate.
+
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    environment:
+      CUBE_RELAY_NAME: ${RELAY_NAME:-Team}
+      # The host members dial. Every handshake must name exactly this.
+      CUBE_RELAY_PUBLIC_HOST: ${RELAY_DOMAIN:?set RELAY_DOMAIN to the public host name, e.g. relay.example.com}
+      # Caddy's fixed address below: only its X-Forwarded-For is believed.
+      CUBE_RELAY_TRUSTED_PROXY: 172.30.84.2
+    volumes:
+      - relay-data:/data
+    # Not published on the host: only Caddy can reach the relay.
+    expose:
+      - "8484"
+    networks:
+      relay-net:
+        ipv4_address: 172.30.84.3
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>/dev/tcp/127.0.0.1/8484 && printf 'GET /healthz HTTP/1.0\r\n\r\n' >&3 && grep -q '^ok' <&3
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - relay
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?set RELAY_DOMAIN to the public host name, e.g. relay.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      relay-net:
+        ipv4_address: 172.30.84.2
+
+networks:
+  relay-net:
+    ipam:
+      config:
+        - subnet: 172.30.84.0/24
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:

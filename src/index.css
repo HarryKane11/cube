@@ -1,0 +1,228 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Quiet surface, lively cubes: the app is white, gray and one blue. Color belongs to the agents. */
+@theme inline {
+  /* --app-font is set from the typefaces picked in Settings. See lib/fonts.ts. */
+  --font-sans: var(--app-font, -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif);
+  --font-heading: var(--app-font, -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif);
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --color-ground: var(--ground);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  --ground: #f5f5f7;
+  --background: #ffffff;
+  --foreground: #1d1d1f;
+  --card: #ffffff;
+  --card-foreground: #1d1d1f;
+  --popover: #ffffff;
+  --popover-foreground: #1d1d1f;
+  --primary: #0071e3;
+  --primary-foreground: #ffffff;
+  --secondary: #e9e9eb;
+  --secondary-foreground: #1d1d1f;
+  --muted: #f2f2f7;
+  --muted-foreground: #636366;
+  --accent: #ececf0;
+  --accent-foreground: #1d1d1f;
+  --destructive: #c5271b;
+  --border: #e5e5ea;
+  --input: #e5e5ea;
+  --ring: #0071e3;
+  --radius: 0.75rem;
+  color-scheme: light;
+}
+
+.dark {
+  --ground: #0e0e10;
+  --background: #1c1c1e;
+  --foreground: #f5f5f7;
+  --card: #1c1c1e;
+  --card-foreground: #f5f5f7;
+  --popover: #2a2a2d;
+  --popover-foreground: #f5f5f7;
+  --primary: #2997ff;
+  --primary-foreground: #ffffff;
+  --secondary: #3a3a3c;
+  --secondary-foreground: #f5f5f7;
+  --muted: #2a2a2d;
+  --muted-foreground: #a1a1a6;
+  --accent: #323236;
+  --accent-foreground: #f5f5f7;
+  --destructive: #ff8a80;
+  --border: #2c2c2e;
+  --input: #3a3a3c;
+  --ring: #2997ff;
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-ground text-foreground font-sans antialiased;
+    font-size: 14px;
+    line-height: 1.45;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+  }
+  .selectable {
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
+  }
+}
+
+/* Cubes */
+.cube { display: block; flex: none; }
+.cube-flat { display: flex; align-items: center; justify-content: center; gap: 12%; border-radius: 26%; flex: none; }
+.cube-flat i { width: 26%; height: 26%; border-radius: 50%; background: #fff; }
+
+/* Markdown in bubbles and documents */
+.md > div > :first-child { margin-top: 0; }
+.md > div:last-child > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md pre, .md blockquote, .md table { margin: 0 0 8px; }
+.md ul { list-style: disc; padding-left: 20px; }
+.md ol { list-style: decimal; padding-left: 22px; }
+.md li { margin: 2px 0; }
+.md strong { font-weight: 650; }
+.md a { text-decoration: underline; text-underline-offset: 2px; }
+.md :not(pre) > code { font-family: var(--font-mono); font-size: 0.9em; background: color-mix(in srgb, currentColor 12%, transparent); padding: 1px 5px; border-radius: 5px; }
+.md blockquote { border-left: 3px solid var(--border); padding-left: 12px; color: var(--muted-foreground); }
+.md table { border-collapse: collapse; }
+.md th, .md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.md h1, .md h2, .md h3 { font-family: var(--font-heading); letter-spacing: -0.02em; line-height: 1.25; font-weight: 700; margin: 0.9em 0 0.4em; }
+.md h1 { font-size: 1.3em; } .md h2 { font-size: 1.15em; } .md h3 { font-size: 1.05em; }
+.at { color: var(--primary); font-weight: 600; background: color-mix(in srgb, var(--primary) 12%, transparent); padding: 0 4px; border-radius: 5px; }
+.mine .at { color: var(--primary-foreground); background: color-mix(in srgb, #fff 22%, transparent); }
+.caret .md > div:last-child > :last-child::after { content: ""; display: inline-block; width: 2px; height: 1em; background: var(--primary); margin-left: 2px; vertical-align: -2px; animation: caret 1s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+
+.doc { max-width: 720px; margin: 0 auto; padding: 36px 40px 56px; font-size: 16px; line-height: 1.65; }
+.doc h1 { font-size: 30px; } .doc h2 { font-size: 22px; } .doc h3 { font-size: 18px; }
+
+.sheet table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.sheet th, .sheet td { border: 1px solid var(--border); padding: 6px 12px; white-space: nowrap; text-align: left; }
+.sheet th { background: var(--muted); font-weight: 600; position: sticky; top: 0; }
+.sheet th[scope="row"] { color: var(--muted-foreground); font-weight: 500; text-align: center; }
+
+/* File glyphs: small shapes cut from the cube, one per kind of file. */
+.glyph { width: 22px; height: 22px; border-radius: 7px; display: flex; align-items: center; justify-content: center; flex: none; background: #e9e9eb; }
+.glyph i { display: block; }
+.glyph-sm { transform: scale(0.78); margin: -2px; }
+.glyph-md, .glyph-text { background: #e1eeff; }
+.glyph-md i, .glyph-text i { width: 11px; height: 9px; border-top: 2px solid #1f7ae8; border-bottom: 2px solid #1f7ae8; background: linear-gradient(#1f7ae8, #1f7ae8) left center / 7px 2px no-repeat; }
+.glyph-html { background: #ffe9d6; }
+.glyph-html i { width: 12px; height: 9px; border-radius: 2px; border: 2px solid #f26b1d; border-top-width: 4px; }
+.glyph-image { background: #ffe3f0; }
+.glyph-image i { width: 9px; height: 9px; border-radius: 50%; background: #e83e8c; }
+.glyph-video, .glyph-audio { background: #ede6ff; }
+.glyph-video i, .glyph-audio i { border-left: 8px solid #7a4df0; border-top: 5px solid transparent; border-bottom: 5px solid transparent; margin-left: 2px; }
+.glyph-csv { background: #dff6e8; }
+.glyph-csv i { width: 11px; height: 11px; background: linear-gradient(#1fa864, #1fa864) 0 0 / 5px 5px no-repeat, linear-gradient(#1fa864, #1fa864) 6px 0 / 5px 5px no-repeat, linear-gradient(#1fa864, #1fa864) 0 6px / 5px 5px no-repeat, linear-gradient(#8fddb2, #8fddb2) 6px 6px / 5px 5px no-repeat; }
+.glyph-code i { width: 7px; height: 7px; border-left: 2.5px solid #1d1d1f; border-bottom: 2.5px solid #1d1d1f; transform: rotate(45deg); margin-left: 3px; }
+.glyph-pdf { background: #ffe1de; }
+.glyph-pdf i { width: 9px; height: 12px; border-radius: 2px; background: #e5483b; }
+.glyph-screen { background: #1d1d1f; }
+.glyph-screen i { width: 12px; height: 8px; border-radius: 2px; background: #2997ff; box-shadow: 0 3px 0 -1px #6e6e73; }
+.glyph-word { background: #e1eeff; }
+.glyph-word i { width: 9px; height: 12px; border-radius: 2px; background: #1f7ae8; }
+.glyph-sheet { background: #dff6e8; }
+.glyph-sheet i { width: 9px; height: 12px; border-radius: 2px; background: #1fa864; }
+.glyph-slides { background: #ffe9d6; }
+.glyph-slides i { width: 12px; height: 9px; border-radius: 2px; background: #f26b1d; }
+.md-block { border-radius: 8px; margin: 0 -8px; padding: 1px 8px; cursor: text; transition: background 120ms; }
+.md-block:hover { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
+.doc .md-block > .md > :first-child { margin-top: 0.6em; }
+.nb-tools { opacity: 0; transition: opacity 120ms; }
+.nb-cell:hover .nb-tools, .nb-cell:focus-within .nb-tools { opacity: 1; }
+.sheet td, .sheet th[scope="col"] { cursor: cell; }
+.sheet-del { width: 100%; color: inherit; }
+.sheet-del:hover span { display: none; }
+.sheet-del:hover::after { content: "×"; color: var(--destructive); font-weight: 700; }
+.glyph-notebook { background: #fff0d9; }
+.glyph-notebook i { width: 11px; height: 11px; border-radius: 50%; border: 2.5px solid #f37726; }
+.glyph-icon { background: none; border-radius: 0; }
+.glyph-icon img { width: 100%; height: 100%; display: block; }
+.glyph-other i { width: 9px; height: 9px; border-radius: 3px; background: #8e8e93; }
+
+/* In the editor's margin: the mark that offers a comment on the line under the pointer. */
+.cube-add-comment { cursor: pointer; }
+.cube-add-comment::after { content: "+"; display: flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin: 2px 0 0 3px; border-radius: 5px; background: var(--primary); color: #fff; font: 700 13px/1 var(--font-sans); }
+
+/* Brand marks are single-color SVGs, tinted with the current text color. */
+.brand-mark { display: inline-block; width: 14px; height: 14px; background: currentColor; -webkit-mask: var(--src) center / contain no-repeat; mask: var(--src) center / contain no-repeat; flex: none; }
+
+/* New messages settle into place. Starts visible on purpose. */
+.msg-in { animation: msg-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1); }
+@keyframes msg-in { from { transform: translateY(8px); opacity: 0.55; } }
+@media (prefers-reduced-motion: reduce) { .msg-in { animation: none; } }
+
+/* A message someone jumped to: a short flash so the eye lands on it. */
+@keyframes msg-flash { 0%, 35% { background: color-mix(in oklab, var(--primary) 16%, transparent); } 100% { background: transparent; } }
+.msg-flash { animation: msg-flash 1.8s ease-out; }
+
+/* The team on the home screen: cubes bob a little, each on its own beat, lean in when pointed at and hop when pressed. */
+@keyframes buddy-bob { 0%, 100% { transform: translateY(0) rotate(-1.5deg); } 50% { transform: translateY(-7px) rotate(1.5deg); } }
+@keyframes buddy-hop { 0% { transform: scale(1); } 30% { transform: scale(0.86, 0.8) translateY(6px); } 65% { transform: scale(1.12, 1.16) translateY(-16px); } 100% { transform: scale(1); } }
+.buddy-bob { animation: buddy-bob 3.6s ease-in-out infinite; transform-origin: 50% 80%; will-change: transform; }
+.buddy-lead { animation-duration: 4.4s; }
+.buddy > .buddy-bob { transition: filter 0.2s ease; }
+.buddy:hover > .buddy-bob { animation-play-state: paused; filter: brightness(1.08) drop-shadow(0 6px 14px rgb(0 0 0 / 0.18)); }
+.buddy-bob.buddy-hop { animation: buddy-hop 0.26s cubic-bezier(0.3, 1.4, 0.5, 1) 1; }
+.calm .buddy-bob { animation: none; }
+@media (prefers-reduced-motion: reduce) { .buddy-bob, .buddy-bob.buddy-hop { animation: none; } }
+
+/* The team cube strolls around a little and its teammates trail after it, each a beat behind. */
+@keyframes buddy-wander {
+  0%, 100% { translate: 0 0; }
+  18% { translate: 46px -9px; }
+  40% { translate: 16px 11px; }
+  64% { translate: -48px -7px; }
+  84% { translate: -18px 9px; }
+}
+.buddy { animation: buddy-wander 11s ease-in-out infinite; animation-delay: calc(var(--lag, 0) * 1s); }
+.buddy:hover, .buddy:focus-visible { animation-play-state: paused; }
+/* Teammates stay in the background until pointed at, or until they have something going on. */
+.buddy-sub > .buddy-bob { filter: saturate(0.3) brightness(0.7); transition: filter 0.25s ease; }
+.buddy-sub:hover > .buddy-bob, .buddy-sub:focus-visible > .buddy-bob { filter: brightness(1.08) drop-shadow(0 6px 14px rgb(0 0 0 / 0.18)); }
+.buddy-sub.buddy-busy > .buddy-bob { filter: none; }
+.calm .buddy { animation: none; }
+@media (prefers-reduced-motion: reduce) { .buddy { animation: none; } }

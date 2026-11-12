@@ -1,0 +1,9 @@
+target/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.key
+.git/
+README.md
+docker-compose.yml
+Caddyfile

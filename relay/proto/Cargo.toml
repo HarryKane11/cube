@@ -1,0 +1,15 @@
+[package]
+name = "cube-proto"
+description = "Wire format shared by cube-relay and the Cube app: signed events, connection challenges, invite links"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = "2"
+hex = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"

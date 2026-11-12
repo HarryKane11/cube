@@ -1,0 +1,44 @@
+[package]
+name = "cube-relay"
+description = "Team relay for Cube: stores and passes on signed events for one workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "cube-relay"
+
+[lib]
+name = "cube_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cube-relay"
+path = "src/main.rs"
+
+[[bin]]
+name = "cube-peer"
+path = "src/bin/cube-peer.rs"
+
+[dependencies]
+cube-proto = { path = "../proto" }
+
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
+base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hex = "0.4"
+rand = "0.8"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# cube-peer only: a WebSocket client, TLS for wss:// relays, argument parsing.
+clap = { version = "4", features = ["derive"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+tempfile = "3"
