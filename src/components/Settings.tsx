@@ -8,6 +8,8 @@ import { BellIcon, BookIcon, CubeIcon, DataIcon, GearIcon, PeopleIcon, PlugIcon,
 import { People } from "@/components/People";
 import { Knowledge } from "@/components/Knowledge";
 import { RemoteAgents } from "@/components/RemoteAgents";
+import { SlackSettings } from "@/components/SlackSettings";
+import { Subagents } from "@/components/Subagents";
 import { EnginesFound, RoleEngines } from "@/components/TeamSetup";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -188,6 +190,10 @@ export function SettingsView() {
           <div className="mt-2"><RoleEngines /></div>
         </Section>
 
+        <Section title="Your sub-agents">
+          <Subagents />
+        </Section>
+
         <Section title="How work is handed out">
           <Switch label="Pick the cube for me" hint="When a channel message names nobody, the Router reads it and passes it to the right cube, or to the Orchestrator when it takes a team. Off: whoever spoke last answers." checked={settings.autoAssign} onChange={(v) => set("autoAssign", v)} />
           <div className="flex items-center gap-4 py-3">
@@ -229,6 +235,10 @@ export function SettingsView() {
 
         <Section title="Remote agents">
           <RemoteAgents />
+        </Section>
+
+        <Section title="Slack">
+          <SlackSettings />
         </Section>
           </>
         )}

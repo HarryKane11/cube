@@ -13,7 +13,8 @@ import { CheckIcon } from "@/components/icons";
 import { CopyIcon, PencilIcon, PinIcon, RewindIcon, ThreadIcon, TrashIcon } from "@/components/icons";
 import { kindOf } from "@/lib/files";
 import { Steps, StepsContent, StepsItem, StepsTrigger } from "@/components/ui/steps";
-import { TextShimmer } from "@/components/ui/text-shimmer";
+import { HelperCard } from "@/components/HelperCard";
+import { Rolling } from "@/components/Rolling";
 import { Cube, CubeStill } from "@/cube/Cube";
 import { cn } from "@/lib/utils";
 import { useCube, type Ask, type Msg } from "@/state/store";
@@ -387,7 +388,7 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
             {msg.pinned && <span className="flex items-center gap-0.5 font-semibold text-primary"><PinIcon width={11} height={11} /> pinned</span>}
           </div>
 
-          {msg.streaming && lastAct && <TextShimmer className="px-1 text-[13px]" duration={2.2}>{lastAct.label}</TextShimmer>}
+          {msg.streaming && lastAct && <Rolling className="px-1 text-[13px]" text={lastAct.label} />}
 
           {editing !== undefined ? (
             <form className="flex w-[min(460px,60vw)] flex-col gap-1.5 rounded-[18px] border bg-background p-2" onSubmit={(e) => { e.preventDefault(); saveEdit(); }}>
@@ -460,6 +461,8 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
             </section>
           )}
 
+          {agent && msg.helper && <HelperCard msg={msg} />}
+
           {agent && msg.asks?.map((a) => <ApprovalCard msg={msg} ask={a} name={agent.name} key={a.id} />)}
 
           {agent && msg.branch && <BranchCard msg={msg} name={agent.name} />}
@@ -504,6 +507,9 @@ export function ThreadSummary({ root, replies }: { root: Msg; replies: Msg[] }) 
   if (!replies.length) return null;
   const authors = [...new Set(replies.map((r) => r.author))].slice(0, 4);
   const last = replies[replies.length - 1];
+  // What is going on in the thread is said here, since the replies themselves are not in the conversation.
+  const waiting = replies.some((r) => r.asks?.some((a) => a.state === "waiting"));
+  const working = replies.some((r) => r.streaming);
   return (
     <button
       type="button"
@@ -517,7 +523,11 @@ export function ThreadSummary({ root, replies }: { root: Msg; replies: Msg[] }) 
         })}
       </span>
       <span className="font-semibold text-primary">{replies.length === 1 ? "1 reply" : `${replies.length} replies`}</span>
-      <span className="text-xs text-muted-foreground">last at {timeOf(last.ts)}</span>
+      {waiting
+        ? <span className="text-xs font-semibold text-destructive">waiting for your OK</span>
+        : working
+          ? <span className="text-xs font-semibold text-primary">working…</span>
+          : <span className="text-xs text-muted-foreground">last at {timeOf(last.ts)}</span>}
     </button>
   );
 }

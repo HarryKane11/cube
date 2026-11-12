@@ -132,6 +132,38 @@ docker run -d --name cube-relay -v cube-relay-data:/data -p 127.0.0.1:8484:8484 
 docker exec cube-relay cube-relay owner-invite
 ```
 
+## Deploying on Railway
+
+Railway runs the image, gives it an HTTPS address and keeps the database on a volume, so no
+server or domain of your own is needed. `Dockerfile.railway` and `railway.json` are for this.
+
+1. Put the repository on GitHub and, in Railway, make a project with **Deploy from GitHub repo**.
+   (Or install the Railway CLI, run `railway login`, and in this directory `railway init` and
+   `railway up`.)
+2. In the service's **Settings**: set **Root Directory** to `relay`, and the Railway config file
+   to `/relay/railway.json` (the config path does not follow the root directory).
+3. Attach a **volume** to the service with the mount path `/data`. Without it the database is
+   lost on every deploy.
+4. Under **Networking**, generate a public domain.
+5. Under **Variables**, set `CUBE_RELAY_PUBLIC_HOST` to `${{RAILWAY_PUBLIC_DOMAIN}}` and
+   `CUBE_RELAY_NAME` to your team's name. The relay refuses to start without the first.
+6. Deploy. `https://<your domain>/healthz` answers `ok`.
+7. Make the owner invite inside the running service: copy the service's SSH command from the
+   dashboard (or `railway ssh`), and in that shell run `cube-relay owner-invite`. Paste the link
+   it prints into Cube under Settings > People.
+
+What is different from the Docker and Caddy setup:
+
+- The container runs as root. Railway mounts volumes for root, and the relay must be able to
+  write its database.
+- The relay listens on the port Railway passes in `PORT`.
+- `CUBE_RELAY_TRUSTED_PROXY` is left unset, because Railway's proxy has no fixed address to
+  list. Every member then counts as one address for the limit on failed handshakes: ten failed
+  attempts by anyone hold everyone off for a minute. For a small team that knows each other
+  this is acceptable; a relay open to strangers should sit behind a proxy with a fixed address.
+- Keep one replica (Railway does not allow replicas with a volume), and expect a few seconds
+  without the relay on each deploy. The app reconnects on its own.
+
 ## Backup
 
 All state is the SQLite file named by `CUBE_RELAY_DB` plus, while the relay runs, its `-wal` and

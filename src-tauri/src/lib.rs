@@ -20,7 +20,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 mod browser;
 mod knowledge;
+mod picture;
 mod remote;
+mod slack;
 mod team;
 
 /// Running agent processes, keyed by run id.
@@ -1131,6 +1133,7 @@ pub fn run() {
         .manage(browser::Browser::default())
         .manage(remote::Remote::default())
         .manage(team::Team::default())
+        .manage(slack::Slack::default())
         .invoke_handler(tauri::generate_handler![
             agent_start,
             agent_stop,
@@ -1177,6 +1180,15 @@ pub fn run() {
             knowledge::knowledge_import,
             knowledge::knowledge_export,
             knowledge::knowledge_remove,
+            slack::slack_set,
+            slack::slack_configured,
+            slack::slack_clear,
+            slack::slack_start,
+            slack::slack_post,
+            slack::slack_user,
+            slack::slack_upload,
+            slack::slack_scopes,
+            picture::draw_picture,
             team::team_info,
             team::team_join,
             team::team_start,

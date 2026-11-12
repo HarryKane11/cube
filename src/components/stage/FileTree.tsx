@@ -224,29 +224,41 @@ export function FileTree({ convId, dir, current }: { convId: string; dir: string
   };
 
   const ops: Ops = { shut: q ? new Set() : shut, toggle, byRel, changes, current, pick: (rel) => select(convId, rel, true), busy, setBusy, rename: (f, t) => void rename(f, t), trash: (r) => void trash(r) };
-  const seg = "h-6 flex-1 rounded-md text-xs font-medium text-muted-foreground";
-  const on = "bg-background font-semibold text-foreground shadow-sm";
+  const chip = "h-6 rounded-full bg-secondary px-2 text-xs font-medium text-muted-foreground hover:text-foreground";
   const note = "px-2 py-1 text-[13px] text-muted-foreground";
 
   return (
     <nav className="flex size-full flex-col" aria-label="Files in this conversation">
+      {/* One field. What else can be listed shows up only when there is something to list. */}
       <div className="flex flex-none flex-col gap-1.5 p-2">
-        <div className="flex rounded-lg bg-secondary p-0.5" role="group" aria-label="What to list">
-          <button type="button" aria-pressed={tab === "files"} className={cn(seg, tab === "files" && on)} onClick={() => setTab("files")}>Files</button>
-          <button type="button" aria-pressed={tab === "changes"} className={cn(seg, tab === "changes" && on)} onClick={() => setTab("changes")}>
-            Changes{changed.length > 0 && <span className="ml-1 tabular-nums">{changed.length}</span>}
+        <div className="flex gap-1">
+          <input
+            aria-label={tab === "search" ? "Search in all files" : "Find a file by name"}
+            value={tab === "search" ? find : q}
+            onChange={(e) => {
+              if (tab === "search") return setFind(e.target.value);
+              setQ(e.target.value);
+              if (tab === "changes") setTab("files");
+            }}
+            placeholder={tab === "search" ? "Search in all files" : "Find a file"}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            className={field}
+          />
+          <button type="button" aria-label="New file" title="New file" className="flex size-7 flex-none items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground" onClick={() => { setTab("files"); setAdding(true); }}>
+            <PlusIcon width={14} height={14} />
           </button>
-          <button type="button" aria-pressed={tab === "search"} className={cn(seg, tab === "search" && on)} onClick={() => setTab("search")}>Search</button>
         </div>
-        {tab === "files" && (
-          <div className="flex gap-1">
-            <input aria-label="Find a file by name" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find a file" spellCheck={false} autoCapitalize="off" autoCorrect="off" className={field} />
-            <button type="button" aria-label="New file" title="New file" className="flex size-7 flex-none items-center justify-center rounded-lg bg-muted text-muted-foreground hover:text-foreground" onClick={() => setAdding(true)}>
-              <PlusIcon width={14} height={14} />
-            </button>
+        {(tab !== "files" || changed.length > 0 || Boolean(q.trim())) && (
+          <div className="flex flex-wrap gap-1">
+            {tab !== "files" && <button type="button" className={chip} onClick={() => setTab("files")}>All files</button>}
+            {tab !== "changes" && changed.length > 0 && (
+              <button type="button" className={chip} onClick={() => setTab("changes")}>Changes<span className="ml-1 tabular-nums">{changed.length}</span></button>
+            )}
+            {tab === "files" && Boolean(q.trim()) && <button type="button" className={chip} onClick={() => { setFind(q); setTab("search"); }}>Search inside files</button>}
           </div>
         )}
-        {tab === "search" && <input autoFocus aria-label="Search in all files" value={find} onChange={(e) => setFind(e.target.value)} placeholder="Search in all files" spellCheck={false} autoCapitalize="off" autoCorrect="off" className={field} />}
       </div>
       <div className="min-h-0 flex-1 overflow-auto px-1.5 pb-2">
         {tab === "files" && (

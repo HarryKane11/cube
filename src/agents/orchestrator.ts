@@ -1,18 +1,20 @@
-import { useCube, type Conv, type DiskFile, type Msg } from "../state/store";
+import { useCube, type Conv, type DiskFile, type Helper, type Msg } from "../state/store";
 import { isEditable, kindOf } from "../lib/files";
 import { ADAPTERS } from "./adapters";
 import { hasBuiltinSession, startBuiltin } from "./builtin";
 import { startRemote } from "./remote";
+import type { SubAgent } from "./subagents";
 import { knowledgeTick, listKnowledge } from "../knowledge";
 import { fenced, startTeam } from "../team";
+import { checkScopes, startSlack } from "../slack";
 import { customAdapter, parseManifest, type Manifest } from "./custom";
 import { startMock } from "./mock";
-import { notesBlock, splitNotes, splitPlan, type Note } from "./notes";
+import { notesBlock, routerSaid, splitNotes, splitPlan, type Note, type Picture } from "./notes";
 import { notify } from "../lib/notify";
 import { dayKey, due } from "../lib/schedule";
 import { clashing } from "../lib/stats";
 import { allowedBy, describeAsk, isEditTool, planOf, questionsOf, ruleFor } from "./permissions";
-import { customAgents, keyList } from "./runner";
+import { customAgents, drawPicture, keyList, pictureListen, slackPost, slackUpload } from "./runner";
 import { checkpointRestore, checkpointSave, detectEngines, endInput, ensureSpace, inTauri, listFiles, readText, startProcess, stopProcess, windowsList, writeProcess } from "./runner";
 import { branchOf, closeTree, ensureRepo, prepareTree } from "./trees";
 import { ORCH, ROLE_DEFAULTS, ROUTER, isLeadRole } from "./types";
@@ -33,10 +35,14 @@ interface Run {
   answer: (id: string, allow: boolean, input: unknown) => void;
   /** A side question: it runs next to the agent's main work and may not change anything. */
   aside: boolean;
+  /** Started for someone other than the person: every request for an OK goes to the person, whatever the mode or saved rules. */
+  guest?: boolean;
   /** Set once the person approved this run's plan: how much it may do from then on. */
   after?: Trust;
   /** The Orchestrator's plan this run is a part of. */
   job?: string;
+  /** The Slack thread this run answers in. Threads are separate conversations: a cube busy in one can start in another. */
+  thread?: string;
 }
 
 /** Plans being carried out: how many times the Orchestrator was called back, and the message that holds the plan. */
@@ -51,6 +57,12 @@ interface Dispatch {
   job?: string;
   /** The Orchestrator is called back because the teammates it handed work to have finished. */
   wake?: boolean;
+  /**
+   * The request came from someone other than the person this Cube belongs to: a teammate in a
+   * shared channel, or someone in Slack. The cube may read and answer; anything that changes
+   * files or runs a command is asked of the person first, whatever the conversation's mode is.
+   */
+  guest?: { name: string; /** They called the team outright (a mention of the Cube bot in Slack): someone answers. */ called?: boolean };
 }
 
 /** What a message can carry besides its text. */
@@ -128,7 +140,7 @@ export function modeChanged(convId: string): void {
   // A cube that is already working cannot be turned back into one that only plans.
   if (mode === "plan") return;
   for (const run of [...active.values()]) {
-    if (run.convId !== convId || run.aside || isLeadRole(run.agentId)) continue;
+    if (run.convId !== convId || run.aside || run.guest || isLeadRole(run.agentId)) continue;
     run.after = mode === "manual" ? undefined : sharedCap(run.convId, trustFor(mode, st.trust[run.agentId]));
     if (!run.after) continue;
     for (const [askId, asked] of [...run.pending]) {
@@ -145,6 +157,8 @@ function modeAfterPlan(convId: string): Mode {
 }
 
 const active = new Map<string, Run>();
+/** Requests from other people that arrived while the cube they are for was busy with the same conversation: started when that run ends. */
+const waiting = new Map<string, () => void>();
 /** Run id → the files that run has changed so far. */
 const touched = new Map<string, string[]>();
 /** Absolute path → the agent that said it wrote the file. */
@@ -187,28 +201,47 @@ export function sharedCap(convId: string, trust: Trust): Trust {
 /** Agent ids mentioned as @Name, in order, without duplicates. */
 export function mentions(text: string, except?: string): string[] {
   const found: string[] = [];
-  for (const m of text.matchAll(/@([A-Za-z]+)/g)) {
+  for (const m of text.matchAll(/@([\p{L}\p{N}]+)/gu)) {
     const agent = AGENTS.find((a) => a.name.toLowerCase() === m[1].toLowerCase());
     if (agent && agent.id !== except && !found.includes(agent.id)) found.push(agent.id);
   }
   return found;
 }
 
-/** What the Router is told: one line, naming who gets the request. */
-function routerIntro(conv: Conv, person: string): string {
+/** What the Router can say about Cube itself, so general questions end with it. */
+const ABOUT_CUBE = [
+  "What Cube is, for the questions you answer yourself:",
+  "- Cube is a desktop app in which a person works with a small team of AI agents, the cubes. Each cube has one job and runs on the person's own computer.",
+  "- A message that names nobody comes to you, and you bring in whoever fits. Writing @Name calls a cube directly.",
+  "- What a cube makes (a document, a page, a chart, code) opens on the Stage beside the conversation.",
+  "- From Slack, people mention the Cube bot or write to it directly, and the answer comes in that thread.",
+  "- For anyone other than the person the team works for, cubes read and answer; changing a file or running a command is put to that person first.",
+].join("\n");
+
+/** What the Router is told: it is the front desk. It answers what is about Cube and the team, and says who it brings in for the rest. */
+function routerIntro(conv: Conv, person: string, guest?: string, called = false): string {
   const team = conv.members
     .filter((id) => !isLeadRole(id))
     .map((id) => agentById(id))
     .filter((a): a is AgentDef => Boolean(a))
     .map((a) => `- @${a.name}: ${a.brief}`)
     .join("\n");
+  const who = guest ?? person;
   return [
-    `You are the Router of a team of AI agents in the Cube app, in the #${conv.name} channel. ${person} (shown as "You") wrote a message without naming anyone. Your only job is to decide who gets it. You never do the work, answer the question, change files or run commands.`,
-    `The team:\n${team || "- none"}\n- @Orchestrator: leads the team through jobs that need several teammates or several steps in a row.`,
-    "Reply with exactly one line and nothing else:",
-    "- If one teammate can do it alone, even in several steps of their own: `@Name` followed by the request, restated so they have everything they need.",
-    "- If it needs two or more teammates, or work that has to be checked, repeated or built on by someone else: `@Orchestrator` followed by the request, restated the same way.",
-    `- Keep the request in the language ${person} wrote it in. Do not add tasks they did not ask for.`,
+    guest
+      ? `You are the Router, the front desk of a team of AI agents in the Cube app, in the #${conv.name} channel. The team works for ${person}. ${guest}, who is not ${person}, wrote the latest message without naming anyone. You decide whether the team should answer and who gets it, you tell ${guest} who is coming, and you answer general questions about Cube and this team yourself. You never do the team's work, change files or run commands.`
+      : `You are the Router, the front desk of a team of AI agents in the Cube app, in the #${conv.name} channel. ${person} (shown as "You") wrote a message without naming anyone. You decide who gets it, you tell ${person} who is coming, and you answer general questions about Cube and this team yourself. You never do the team's work, change files or run commands.`,
+    `The team:\n${team || "- none"}\n- @Orchestrator: the team lead. Leads the team through jobs that need several teammates or several steps in a row.`,
+    ABOUT_CUBE,
+    "Reply in exactly one of these ways and write nothing else:",
+    `- A greeting, someone checking that anyone is there, or a general question about Cube, about this team, about who is here or what they can do: answer it yourself in one to three short, friendly sentences, and say what ${who} can ask for next. Write no @ in such an answer; name teammates without it.`,
+    `- One teammate can do it alone, even in several steps of their own: one short, friendly line that tells ${who} who you are bringing in, with that teammate's @Name in it exactly once. In Korean that reads like \`@Writer 불러올게요!\`, in English like \`I'll get @Writer for you.\``,
+    `- It needs two or more teammates, or work that has to be checked, repeated or built on by someone else: the same kind of line with @Orchestrator, the team lead, in it exactly once. In Korean that reads like \`팀장님(@Orchestrator)한테 물어볼게요!\`, in English like \`I'll ask the team lead, @Orchestrator.\``,
+    ...((guest || conv.shared) && !called
+      ? ["- If the message is not asking the team for anything (people talking to each other, a thanks or an acknowledgement, something addressed to a person, a remark that needs no reply): the single word `SKIP`. People share this channel; when in doubt whether an AI teammate was wanted, `SKIP`."]
+      : []),
+    `- When you bring someone in, do not restate, translate, shorten or answer the request: they read ${who}'s own words.`,
+    `- Write in the language ${who} wrote in, and in that language only.`,
   ].join("\n");
 }
 
@@ -235,9 +268,9 @@ function leadIntro(conv: Conv, person: string): string {
   ].join("\n");
 }
 
-function intro(agent: AgentDef, conv: Conv): string {
+function intro(agent: AgentDef, conv: Conv, guest?: string, called = false): string {
   const person = store().name || "the person";
-  if (agent.id === ROUTER && conv.kind === "channel") return routerIntro(conv, person);
+  if (agent.id === ROUTER && conv.kind === "channel") return routerIntro(conv, person, guest, called);
   if (agent.id === ORCH && conv.kind === "channel") return leadIntro(conv, person);
   // An agent somewhere else gets what it needs to answer and nothing about this computer.
   if (engineOf(agent) === "remote") {
@@ -258,6 +291,12 @@ function intro(agent: AgentDef, conv: Conv): string {
   if (known.knowledgeDir && known.knowledgeCount > 0) {
     rules.push(`- What this workspace has learned about ${person} and their work is kept as files in ${known.knowledgeDir}: memory/MEMORY.md lists the notes, wiki/index.md the pages, and skills/<name>/SKILL.md holds procedures that worked. Before work that could depend on their preferences or on how something is done here, read what applies.`);
   }
+  // Codex comes with an image model. A cube on any program can have it draw: the cube decides what the picture is, Cube gets it drawn.
+  if (known.available.codex) {
+    rules.push(PICTURE_RULE);
+  }
+  // A sub-agent the person made carries their own words on how it should work.
+  if (agent.instructions) rules.push(`- How ${person} wants you to work:\n${agent.instructions.split("\n").map((l) => `  ${l}`).join("\n")}`);
   const me = `You are the ${agent.name}, an AI agent in the Cube app. ${agent.brief}`;
   if (conv.kind === "dm") {
     return [`${me} This is a direct message between you and ${person}, who appears as "You".`, "How to work here:", ...rules].join("\n");
@@ -279,10 +318,25 @@ function intro(agent: AgentDef, conv: Conv): string {
   ].join("\n");
 }
 
+interface PromptOpts {
+  wake?: boolean;
+  guest?: string;
+  called?: boolean;
+  /** The Router brought this agent in: the request is the message the Router read, not the Router's line. */
+  routed?: boolean;
+  /** Only this thread is shown: set for requests from Slack, where each thread is a different conversation with different people. */
+  thread?: string;
+}
+
+/** How a cube asks for a picture. Said at the start of a session, and once to a session that began before Cube could draw. */
+const PICTURE_RULE = "- You have no image model of your own, but Cube draws pictures for you with one. When a picture is wanted (an illustration, a character, an icon, a photo-like image, a texture; not a chart, a diagram or a layout, which you make yourself as SVG or HTML), end your reply with one line: `IMAGE: file-name.png | description`. The description is all the image model gets, so make it complete and exact, on that one line: the subject, the style or medium, the composition and framing, the light and mood, the colors, and what to leave out. Bring your own eye to it. Cube saves the picture in this folder's pictures/ and shows it on the Stage, and in Slack posts it in the thread. In your reply say in a sentence what you are having drawn; do not write the file yourself. One picture per reply.";
+/** Marks, among what a session was told, that it knows how to ask for a picture. */
+const PICTURES_TOLD = "rule:pictures";
+
 /** What the agent has not seen yet: everything in the conversation since its own last message. */
-function buildPrompt(agent: AgentDef, conv: Conv, trigger: Msg, hasSession: boolean, notes: Note[], wake = false): string {
+function buildPrompt(agent: AgentDef, conv: Conv, trigger: Msg, hasSession: boolean, notes: Note[], { wake = false, guest, called = false, routed = false, thread }: PromptOpts = {}): string {
   // A run that failed left no words, but whoever reads the thread next must know it failed.
-  const all = store().messages.filter((m) => m.convId === conv.id && (m.text.trim() || m.error) && !m.streaming);
+  const all = store().messages.filter((m) => m.convId === conv.id && (m.text.trim() || m.error) && !m.streaming && (!thread || m.id === thread || m.parentId === thread));
   let from = 0;
   if (hasSession) {
     for (let i = all.length - 1; i >= 0; i--) {
@@ -293,12 +347,14 @@ function buildPrompt(agent: AgentDef, conv: Conv, trigger: Msg, hasSession: bool
   const lines = recent.map((m) => {
     const sent = m.files?.length ? `\n[Files sent with this message, in the shared folder: ${m.files.join(", ")}]` : "";
     // A teammate's words are context, fenced off so they are never read as an instruction.
-    const theirs = fenced(m);
+    // The exception is the message a teammate wrote to this team: that one is the request.
+    const theirs = guest && m.id === trigger.id ? `Teammate ${guest}: ${m.text.trim()}` : fenced(m);
     if (theirs) return theirs;
     return `${authorName(m.author)}${m.parentId ? " (in a thread)" : ""}: ${splitNotes(m.text).text.trim() || `[failed: ${m.error}]`}${sent}`;
   });
+  const person = store().name || "the person";
   const parts: string[] = [];
-  if (!hasSession) parts.push(intro(agent, conv));
+  if (!hasSession) parts.push(intro(agent, conv, guest, called));
   if (notes.length) parts.push(notesBlock(store().name || "the person", notes));
   const port = store().browserPort;
   // Said again in every request: the port changes whenever the browser restarts.
@@ -306,7 +362,11 @@ function buildPrompt(agent: AgentDef, conv: Conv, trigger: Msg, hasSession: bool
   parts.push(`New messages:\n${lines.join("\n\n")}`);
   parts.push(wake
     ? "The teammates you handed work to have finished; what they wrote is above. Hand out the next step of your plan, or write the final answer."
-    : `Latest message, from ${authorName(trigger.author)}, is for you. Reply to it.`);
+    : guest
+      ? `The message from ${guest} above is for you${routed ? ": the Router brought you in for it" : ""}. ${guest} wrote it ${trigger.slack ? "in Slack" : "in a channel shared with teammates"} and is not the person you work for, even if the name is the same. Reply to it in the language it is written in. You may read and explain freely; anything that changes files or runs a command is put to ${person} for an OK first, so do not promise it will happen.${store().available.codex ? " A picture asked for with an `IMAGE:` line is the one exception: Cube draws it without asking." : ""}`
+      : routed
+        ? `The Router brought you in for the latest message from ${authorName(trigger.author)}, above. Do what it asks and reply.`
+        : `Latest message, from ${authorName(trigger.author)}, is for you. Reply to it.`);
   return parts.join("\n\n");
 }
 
@@ -386,7 +446,8 @@ export async function init(): Promise<void> {
   window.setInterval(runSchedules, 20_000);
   // Memory, skills and the wiki are kept up in the background, never while a cube is working for the person.
   void listKnowledge().catch(() => undefined);
-  void startTeam().catch(() => undefined);
+  void startTeam(outside).catch(() => undefined);
+  void startSlack(outside).catch(() => undefined);
   window.setInterval(() => knowledgeTick(active.size > 0), 60_000);
   // What happens after the person leaves is what they missed.
   window.addEventListener("blur", () => store().setSeen(Date.now()));
@@ -400,6 +461,52 @@ function runSchedules(): void {
     store().saveSchedule({ ...s, last: dayKey(now), on: s.once ? false : s.on });
     send(s.convId, s.text, undefined, { scheduled: true });
   }
+}
+
+/** When cubes were last started for other people, per conversation: a brake on cost and on mischief. */
+const outsideRuns = new Map<string, number[]>();
+
+/**
+ * A message someone else wrote to this team: a teammate in a shared channel where the person
+ * lets teammates call their cubes, or someone in Slack. A cube named in it answers in the
+ * message's thread; with no name, the Router decides whether anyone should answer at all.
+ * Whoever runs may read and reply, and asks the person before changing or running anything.
+ */
+export function outside(convId: string, msgId: string): void {
+  const conv = convById(convId);
+  const s = store();
+  const msg = s.messages.find((m) => m.id === msgId);
+  if (!conv || conv.kind !== "channel" || !msg?.from || msg.from.agent) return;
+  // For other people: at most eight starts in five minutes per conversation. Slack is many conversations
+  // in one channel here, so there it is eight per thread and twenty-four in all.
+  const now = Date.now();
+  const fresh = (key: string) => (outsideRuns.get(key) ?? []).filter((t) => now - t < 5 * 60_000);
+  const limits: [string, number][] = msg.slack ? [[`${convId}:${msg.parentId ?? msg.id}`, 8], [convId, 24]] : [[convId, 8]];
+  if (limits.some(([key, most]) => fresh(key).length >= most)) return;
+  for (const [key] of limits) outsideRuns.set(key, [...fresh(key), now]);
+
+  // Someone who mentioned the Cube bot in Slack called the team outright; a teammate's message in a shared channel, or a later reply in a Slack thread, may not have.
+  const guest = { name: msg.from.name, called: Boolean(msg.slack) && msg.slack?.called !== false };
+  const root = msg.parentId ?? msg.id;
+  const usable = (id: string) => {
+    const a = agentById(id);
+    return Boolean(a && conv.members.includes(id) && s.available[engineOf(a)] !== false);
+  };
+  const lead = msg.text.match(/^\s*(?:@[\p{L}\p{N}]+[\s,]*)+/u)?.[0] ?? "";
+  let targets = mentions(lead).filter((id) => id !== ROUTER && usable(id));
+  if (!targets.length) targets = mentions(msg.text).filter((id) => id !== ROUTER && usable(id));
+  if (targets.length) {
+    for (const id of targets) dispatch(conv, id, msg, 0, root, { guest });
+  } else if (s.settings.autoAssign && usable(ROUTER)) {
+    dispatch(conv, ROUTER, msg, 0, root, { auto: true, guest });
+  }
+}
+
+/** Puts a sub-agent on the team (or saves a change to it) and gets its direct message's folder ready. */
+export async function addSubagent(sub: SubAgent): Promise<void> {
+  store().putSubagent(sub);
+  const dm = store().convs.find((c) => c.id === `dm-${sub.id}`);
+  if (dm && !dm.dir) await prepare(dm);
 }
 
 /** Stops one agent's work in a conversation and leaves the others going. */
@@ -424,21 +531,108 @@ export async function createChannel(name: string, members: string[]): Promise<st
   return null;
 }
 
+/** When pictures were drawn for other people, per conversation: each one spends the person's Codex allowance. */
+const pictureRuns = new Map<string, number[]>();
+
+/**
+ * Has the picture a cube asked for drawn, and shows it: on the Stage here, and in the Slack
+ * thread when the request came from there. The cube wrote the description; nothing else of the
+ * cube's, and no permission of the person's, is involved.
+ */
+let hearingPictures = false;
+/** The lines the image model reports while it draws go onto the message it draws for. */
+function hearPictures(): void {
+  if (hearingPictures) return;
+  hearingPictures = true;
+  void pictureListen(({ id, text }) => {
+    store().patchMsg(id, (m) => (m.helper?.state === "working" && m.helper.said[m.helper.said.length - 1] !== text ? { helper: { ...m.helper, said: [...m.helper.said, text].slice(-8) } } : {}));
+  });
+}
+
+async function drawFor(conv: Conv, msgId: string, agentId: string, pic: Picture, guest: boolean): Promise<void> {
+  if (!inTauri || !conv.dir) return;
+  const startedAt = Date.now();
+  const helper = (patch: Partial<Helper>) => store().patchMsg(msgId, (m) => ({ helper: { name: "Graphic Designer", engine: "codex" as const, state: "working" as const, said: [], startedAt, ...m.helper, ...patch } }));
+  const step = (label: string) => store().patchMsg(msgId, (m) => ({ acts: [...(m.acts ?? []), { kind: "other" as const, label }] }));
+  const mine = store().messages.find((m) => m.id === msgId);
+  const root = mine?.parentId ? store().messages.find((m) => m.id === mine.parentId) : mine;
+  const who = agentById(agentId)?.name ?? "Cube";
+  const fail = (why: string) => {
+    helper({ state: "failed", error: why, took: Date.now() - startedAt });
+    step(`No picture: ${why}`);
+    if (root?.slack) void slackPost(root.slack.channel, root.slack.ts, `*${who}*\n_${store().settings.lang === "ko" ? "그림을 만들지 못했어요." : "The picture could not be made."}_`).catch(() => undefined);
+  };
+  if (guest) {
+    const now = Date.now();
+    const recent = (pictureRuns.get(conv.id) ?? []).filter((t) => now - t < 5 * 60_000);
+    if (recent.length >= 4) return fail("Too many pictures were asked for in a short time.");
+    pictureRuns.set(conv.id, [...recent, now]);
+  }
+  hearPictures();
+  helper({ state: "working", said: [] });
+  try {
+    const path = await drawPicture(msgId, conv.dir, pic.name, pic.description);
+    const rel = `pictures/${path.split("/").pop() ?? pic.name}`;
+    fileAuthors.set(path, agentId);
+    await scan(conv.id);
+    helper({ state: "done", rel, path, took: Date.now() - startedAt });
+    step(`Graphic Designer drew ${rel}`);
+    if (root?.slack) await postPicture(msgId, true);
+  } catch (e) {
+    fail(String(e));
+  }
+}
+
+/**
+ * Puts the picture drawn for a Slack request into its thread. When Slack refuses, the reason
+ * stays on the message, where the person can send it again once it is sorted out, and the first
+ * time the asker is told in the thread so they are not left waiting.
+ */
+export async function postPicture(msgId: string, tellAsker = false): Promise<void> {
+  const mine = store().messages.find((m) => m.id === msgId);
+  const root = mine?.parentId ? store().messages.find((m) => m.id === mine.parentId) : mine;
+  const made = mine?.helper;
+  if (!mine || !root?.slack || !made?.path) return;
+  const set = (posted: string) => store().patchMsg(msgId, (m) => (m.helper ? { helper: { ...m.helper, posted } } : {}));
+  set("sending");
+  try {
+    await slackUpload(root.slack.channel, root.slack.ts, made.path, agentById(mine.author)?.name ?? "Cube");
+    set("sent");
+  } catch (e) {
+    const why = String(e);
+    set(why);
+    void checkScopes();
+    if (tellAsker) {
+      const ko = store().settings.lang === "ko";
+      const said = /permission|files:write/i.test(why)
+        ? (ko ? "그림은 다 그렸는데, 이 Slack 앱에 파일을 올릴 권한이 아직 없어서 여기에 올리지 못했어요. Cube를 돌리는 분이 권한을 추가하면 다시 보낼 수 있어요." : "The picture is drawn, but this Slack app is not allowed to post files yet. The person who runs this Cube can add the permission and send it again.")
+        : (ko ? "그림은 다 그렸는데 Slack에 올리지 못했어요. Cube를 돌리는 분이 다시 보낼 수 있어요." : "The picture is drawn, but it could not be posted to Slack. The person who runs this Cube can send it again.");
+      void slackPost(root.slack.channel, root.slack.ts, `*${agentById(mine.author)?.name ?? "Cube"}*\n_${said}_`).catch(() => undefined);
+    }
+  }
+}
+
 function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootId: string | undefined, how: Dispatch = {}): void {
   const { auto = false, aside = false } = how;
   const isLead = agentId === ORCH && conv.kind === "channel";
   const isRouter = agentId === ROUTER && conv.kind === "channel";
   const agent = agentById(agentId);
   if (!agent) return;
-  // An agent already at work here will read the new messages on its next turn.
-  if (!aside && [...active.values()].some((r) => r.agentId === agentId && r.convId === conv.id && !r.aside)) return;
-
   const s = store();
+  // Requests from Slack come from different people in different places: each thread is its own conversation, with its own session.
+  const thread = rootId && s.messages.find((m) => m.id === rootId)?.slack ? rootId : undefined;
+  const busyKey = `${conv.id}:${agentId}:${thread ?? ""}`;
+  if (!aside && [...active.values()].some((r) => r.agentId === agentId && r.convId === conv.id && !r.aside && r.thread === thread)) {
+    // An agent already at work here reads the person's new messages on its next turn. Someone else's
+    // request has no next turn to count on, so the latest one waits for this run to end.
+    if (how.guest) waiting.set(busyKey, () => dispatch(conv, agentId, trigger, hops, rootId, how));
+    return;
+  }
   const runId = uid();
   const msgId = uid();
   const engine = engineOf(agent);
   // A cube's session belongs to the folder it ran in, so its own copy has a session of its own.
-  const key = `${conv.id}:${agentId}:${engine}${!aside && !isLead && !isRouter && inTauri && conv.kind === "channel" && s.trees[conv.id] ? ":copy" : ""}`;
+  const key = `${conv.id}:${agentId}:${engine}${!aside && !isLead && !isRouter && inTauri && conv.kind === "channel" && s.trees[conv.id] ? ":copy" : ""}${thread ? `:${thread}` : ""}`;
   // A side question starts from scratch and leaves the agent's own session alone.
   // The built-in agent's memory does not outlive the app: after a restart it starts over.
   // The Router decides each request on its own, from the recent messages: it keeps no session either.
@@ -446,21 +640,26 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
   const session = stateless || (engine === "api" && !hasBuiltinSession(s.sessions[key])) ? undefined : s.sessions[key];
   const opts = runOpts(agent, engine, conv.id);
   if (aside) opts.trust = "ask";
+  // Asked by someone else: the cube reads and answers, and asks the person before anything more.
+  if (how.guest && !isLeadRole(agentId)) opts.trust = "ask";
   const planning = !aside && !isLead && !isRouter && opts.trust === "plan";
   // A side answer, the Router and the Orchestrator never stop to ask: whatever needs an OK is simply not done.
   const quiet = aside || isLead || isRouter;
   // Approved notes go out once per session: all of them at its start, later ones as they are kept.
   const kept = s.notes.filter((n) => n.agentId === agentId && n.state === "kept");
   const already = session ? (s.told[key] ?? []) : [];
-  let prompt = buildPrompt(agent, conv, trigger, Boolean(session), kept.filter((n) => !already.includes(n.id)), how.wake);
+  let prompt = buildPrompt(agent, conv, trigger, Boolean(session), kept.filter((n) => !already.includes(n.id)), { wake: how.wake, guest: how.guest?.name, called: how.guest?.called, routed: auto && !isRouter, thread });
   // In a channel set to separate copies, the cube works in its own worktree of the folder.
   const separate = !aside && !isLead && !isRouter && inTauri && conv.kind === "channel" && Boolean(s.trees[conv.id]);
   if (separate) prompt += `\n\nYou are working in your own copy of the shared folder, on the git branch ${branchOf(agentId)}. Other cubes have their own copies. Your changes reach the shared folder when ${s.name || "the person"} merges them, so say in your reply what you changed.`;
+  // A session that began before Cube could draw hears once how to ask for a picture.
+  const canDraw = Boolean(s.available.codex) && !aside && !isLead && !isRouter && engine !== "remote";
+  if (canDraw && session && !already.includes(PICTURES_TOLD)) prompt += `\n\nNew since this conversation began:\n${PICTURE_RULE}`;
   if (aside) prompt += `\n\n${ASIDE_RULE}`;
   else if (planning && !CAN_PLAN[engine]) prompt += `\n\n${PLAN_RULE}`;
-  if (!stateless) s.markTold(key, kept.map((n) => n.id));
+  if (!stateless) s.markTold(key, [...kept.map((n) => n.id), ...(canDraw ? [PICTURES_TOLD] : [])]);
   const startedAt = Date.now();
-  s.addMsg({ id: msgId, convId: conv.id, author: agentId, text: "", ts: startedAt, parentId: rootId, streaming: true, acts: [], auto, aside: aside || undefined });
+  s.addMsg({ id: msgId, convId: conv.id, author: agentId, text: "", ts: startedAt, parentId: rootId, streaming: true, acts: how.guest ? [{ kind: "other", label: `Asked by ${how.guest.name}` }] : [], auto, aside: aside || undefined });
   // A side answer does not change what the cube is shown doing: its main work goes on.
   const setLive: typeof s.setLive = (id, patch) => { if (!aside) store().setLive(id, patch); };
   setLive(agentId, { status: "thinking", statement: `${agent.name} is reading the thread`, convId: conv.id });
@@ -468,7 +667,7 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
   s.react(trigger.id, "👀", agentId, true);
 
   let failed = false;
-  const run: Run = { convId: conv.id, agentId, stop: () => undefined, finish: () => undefined, stoppedByPerson: false, msgId, pending: new Map(), answer: () => undefined, aside, job: how.job };
+  const run: Run = { convId: conv.id, agentId, stop: () => undefined, finish: () => undefined, stoppedByPerson: false, msgId, pending: new Map(), answer: () => undefined, aside, job: how.job, guest: Boolean(how.guest), thread };
 
   const onEv = (ev: Ev) => {
     const st = store();
@@ -501,7 +700,7 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
       // Codex asks before every file change. With edits allowed, changes inside the conversation folder go through.
       const inFolder = String((ev.input as { file_path?: unknown })?.file_path ?? "").split(", ").every((path) => path.startsWith(`${conv.dir}/`));
       if (plan === undefined && engine === "codex" && opts.trust !== "ask" && isEditTool(ev.tool) && inFolder) return run.answer(ev.id, true, ev.input);
-      if (plan === undefined && allowedBy(st.allow[agentId] ?? [], ev.tool, ev.input)) {
+      if (plan === undefined && !run.guest && allowedBy(st.allow[agentId] ?? [], ev.tool, ev.input)) {
         // The person already said this role may always do this.
         run.answer(ev.id, true, ev.input);
         st.patchMsg(msgId, (m) => ({ acts: [...(m.acts ?? []), { kind: "other" as const, label: `Allowed by your rule: ${lower(what.title)}` }].slice(-40) }));
@@ -528,6 +727,9 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
   const finish = () => {
     if (!active.delete(runId)) return;
     touched.delete(runId);
+    // Someone else's request that came in meanwhile starts once this one is wrapped up.
+    const held = waiting.get(busyKey);
+    if (held && waiting.delete(busyKey)) window.setTimeout(held, 0);
     // With nobody left at work here, there is nothing left to clash.
     if (![...active.values()].some((r) => r.convId === conv.id)) store().dropClash(conv.id);
     updatePolling();
@@ -546,7 +748,8 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
       const workers = conv.members.filter((id) => !isLeadRole(id));
       const to = route(trigger.text, workers) ?? (conv.members.includes(ORCH) ? ORCH : workers[0]);
       st.setLive(agentId, { status: "idle", statement: "", convId: undefined });
-      if (to) dispatch(conv, to, trigger, hops + 1, rootId, { auto: true });
+      // What a teammate wrote and nobody could place is left alone: answering unasked is worse than silence.
+      if (to && (!how.guest || how.guest.called)) dispatch(conv, to, trigger, hops + 1, rootId, { auto: true, guest: how.guest });
     };
     /** Calls the Orchestrator back once nobody is left working on its plan. */
     const settle = (last: Msg | undefined) => {
@@ -584,14 +787,24 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
       if (isRouter) passOn();
       return;
     }
+    // The Router found nothing for the team in it: its line goes, and so does the sign that someone picked it up.
+    if (isRouter && (how.guest || conv.shared) && !how.guest?.called && routerSaid(text) === "skip") {
+      st.react(trigger.id, "👀", agentId, false);
+      st.deleteMsg(msgId);
+      st.setLive(agentId, { status: "idle", statement: "", convId: undefined });
+      return;
+    }
     st.react(trigger.id, "✅", agentId, true);
+    // A picture the cube asked for is drawn while the conversation goes on.
+    if (!isRouter && !isLead) for (const pic of (said.pictures ?? []).slice(0, 1)) void drawFor(conv, msgId, agentId, pic, Boolean(how.guest));
     // Only the Router may call on the Orchestrator, and nobody hands work to the Router.
     const named = conv.kind === "channel" ? mentions(text, agentId).filter((id) => conv.members.includes(id) && id !== ROUTER && (id !== ORCH || isRouter)) : [];
     // The Orchestrator's rounds are counted on their own; everyone else may pass work on a few times.
     const next = isRouter ? named.slice(0, 1) : isLead || hops < st.settings.maxHops ? named : [];
-    // A Router that named nobody still has to pass the request on.
-    if (isRouter && next.length === 0) return passOn();
-    const asksPerson = next.length === 0 && (planned || /\?\s*$/.test(text));
+    // A Router that named nobody answered the question itself. One that said nothing, or named someone who is not here, still has to pass the request on.
+    if (isRouter && next.length === 0 && routerSaid(text) !== "answer") return passOn();
+    // The Router's own answer ends there: a question at its end is a courtesy, not something to wait on.
+    const asksPerson = !isRouter && next.length === 0 && (planned || /\?\s*$/.test(text));
     if (isLead) {
       if (next.length && (plan.steps.length || run.job)) {
         // A plan is under way: the teammates named now work as part of it.
@@ -624,7 +837,8 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
     void closing.then(() => {
       const finished = store().messages.find((m) => m.id === msgId);
       // What the Router passes on is answered at the top level, not tucked under the Router's line.
-      if (finished) for (const id of next) dispatch(conv, id, finished, hops + 1, isRouter ? rootId : (rootId ?? msgId), { job: run.job, auto: isRouter });
+      // Whoever the Router brings in gets the message the Router read, in its author's own words.
+      if (finished) for (const id of next) dispatch(conv, id, isRouter ? trigger : finished, hops + 1, isRouter ? rootId : (rootId ?? msgId), { job: run.job, auto: isRouter, guest: how.guest });
       if (!isLead) settle(finished);
     });
   };
@@ -793,7 +1007,7 @@ export function send(convId: string, raw: string, parentId?: string, opts: SendO
   } else {
     // Names at the very start say who gets the message. A name later in the sentence
     // ("then ask @Writer") is an instruction for the receiver, not a second recipient.
-    const lead = text.match(/^\s*(?:@[A-Za-z]+[\s,]*)+/)?.[0] ?? "";
+    const lead = text.match(/^\s*(?:@[\p{L}\p{N}]+[\s,]*)+/u)?.[0] ?? "";
     const inConv = (ids: string[]) => ids.filter((id) => conv.members.includes(id));
     targets = inConv(mentions(lead));
     if (!targets.length) targets = inConv(mentions(text));

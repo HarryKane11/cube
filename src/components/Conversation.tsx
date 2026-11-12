@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { setSeparate, stopAgent, undoRestore } from "@/agents/orchestrator";
 import { agentById, type AgentDef } from "@/agents/types";
 import { EngineLabel } from "@/components/bits";
@@ -162,6 +162,12 @@ export function Conversation() {
 
   const pinned = useMemo(() => messages.filter((m) => m.pinned), [messages]);
   const focusId = useCube((s) => s.focus?.id);
+  const openThread = useCube((s) => s.openThread);
+  // Jumping to a reply (from search, the Inbox or a notification) opens the thread it is in.
+  useEffect(() => {
+    const parent = focusId ? messages.find((m) => m.id === focusId)?.parentId : undefined;
+    if (parent) openThread(parent);
+  }, [focusId]);
 
   const stageOpen = useStageOpen(conv.id);
   const threadOpen = useCube((s) => Boolean(s.threadId));
@@ -183,7 +189,7 @@ export function Conversation() {
             return (
               <div className="flex flex-col gap-1" key={m.id}>
                 <MessageItem msg={m} />
-                {rs.filter((r, i) => i >= rs.length - 2 || r.id === focusId).map((r) => <MessageItem msg={r} compact key={r.id} />)}
+                {/* Replies live in the thread: the conversation shows that there are some, and the panel beside it shows them. */}
                 <ThreadSummary root={m} replies={rs} />
               </div>
             );

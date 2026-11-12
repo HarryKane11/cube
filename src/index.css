@@ -226,3 +226,28 @@
 .buddy-sub.buddy-busy > .buddy-bob { filter: none; }
 .calm .buddy { animation: none; }
 @media (prefers-reduced-motion: reduce) { .buddy { animation: none; } }
+
+/* A line that rolls: the words that were there go up and out, the new ones come up from below. */
+.rolling { display: inline-grid; max-width: 100%; min-width: 0; overflow: hidden; vertical-align: bottom; }
+.rolling > * { grid-area: 1 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rolling-in { animation: roll-in 0.34s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.rolling-out { color: var(--muted-foreground); animation: roll-out 0.3s cubic-bezier(0.4, 0, 1, 1) forwards; }
+@keyframes roll-in { from { transform: translateY(85%); opacity: 0; } }
+@keyframes roll-out { to { transform: translateY(-85%); opacity: 0; } }
+
+/* A helper at work for a cube, under the cube's message. */
+.helper-card { display: flex; flex-direction: column; gap: 10px; width: min(420px, 100%); padding: 10px 12px; border: 1px solid var(--border); border-radius: 16px; background: var(--background); }
+.helper-mark { display: flex; flex: none; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 9px; background: var(--secondary); }
+.helper-live .helper-mark { animation: helper-pulse 1.6s ease-in-out infinite; }
+@keyframes helper-pulse { 50% { transform: scale(0.9); opacity: 0.7; } }
+/* Where the picture will be: an empty frame with light passing over it while it is drawn. */
+.helper-canvas { position: relative; width: 168px; aspect-ratio: 1; overflow: hidden; border-radius: 12px; background: var(--secondary); }
+.helper-canvas::after { content: ""; position: absolute; inset: 0; background: linear-gradient(105deg, transparent 35%, color-mix(in oklab, var(--foreground) 9%, transparent) 50%, transparent 65%); transform: translateX(-100%); animation: helper-sheen 1.5s ease-in-out infinite; }
+@keyframes helper-sheen { to { transform: translateX(100%); } }
+.helper-result { display: block; width: fit-content; overflow: hidden; border-radius: 12px; animation: msg-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.helper-result img { display: block; max-width: 100%; max-height: 220px; }
+.helper-result:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .rolling-in, .rolling-out, .helper-live .helper-mark, .helper-canvas::after, .helper-result { animation: none; }
+  .rolling-out { display: none; }
+}

@@ -573,8 +573,12 @@ impl Db {
         let Some(obj) = body.as_object() else {
             return refuse("bad_body", "body must be a JSON object");
         };
-        let Some(conv) = str_field(obj, "conv").filter(|c| valid_ident(c)) else {
-            return refuse("bad_body", "body.conv must be a short string");
+        // Offers of sub-agents are about a person's own cube, not about a channel.
+        let about_agent = matches!(event.kind.as_str(), "agent.put" | "agent.drop");
+        let conv = match str_field(obj, "conv").filter(|c| valid_ident(c)) {
+            Some(conv) => conv,
+            None if about_agent => "",
+            None => return refuse("bad_body", "body.conv must be a short string"),
         };
 
         // The message whose earlier versions this event replaces, if any.
@@ -689,6 +693,26 @@ impl Db {
                 )?;
                 msg_id = Some(id);
                 redact_earlier = true;
+            }
+            // A member offers one of their sub-agents to the team, or takes the offer back. The
+            // relay only checks the shape: an offer belongs to whoever signed it, and clients key
+            // it by that key, so nobody can replace or withdraw another member's.
+            "agent.put" => {
+                let agent = obj.get("agent").and_then(|a| a.as_object());
+                let shaped = agent.is_some_and(|a| {
+                    str_field(a, "id").is_some_and(valid_ident)
+                        && str_field(a, "name").is_some_and(|n| {
+                            !n.trim().is_empty() && n.chars().count() <= 40 && !n.chars().any(char::is_control)
+                        })
+                });
+                if !shaped {
+                    return refuse("bad_body", "body.agent needs a short id and a name");
+                }
+            }
+            "agent.drop" => {
+                if !str_field(obj, "id").is_some_and(valid_ident) {
+                    return refuse("bad_body", "body.id must be a short string");
+                }
             }
             _ => return refuse("unknown_kind", "unknown event kind"),
         }
@@ -1031,6 +1055,24 @@ mod tests {
         assert!(f.db.revoke_invite(&member, &member_invite.id).is_ok());
         assert!(f.db.revoke_invite(&owner, &admin_invite.id).is_ok());
         assert!(f.db.revoke_invite(&owner, &admin_invite.id).is_err());
+    }
+
+    #[test]
+    fn sub_agent_offers() {
+        let mut f = fixture();
+        let ann = join(&mut f.db, Role::Member, "Ann");
+        let outsider = generate_key();
+        let offer = serde_json::json!({"agent": {"id": "sub-legal", "name": "Legal", "brief": "Reads contracts."}});
+        // A member offers a sub-agent with no channel named, and takes the offer back.
+        assert!(publish(&mut f.db, &ann, "agent.put", offer.clone()).is_ok());
+        assert!(publish(&mut f.db, &ann, "agent.drop", serde_json::json!({"id": "sub-legal"})).is_ok());
+        // Not a member, or not shaped like an offer.
+        assert_eq!(code(publish(&mut f.db, &outsider, "agent.put", offer)), "not_member");
+        assert_eq!(code(publish(&mut f.db, &ann, "agent.put", serde_json::json!({"agent": {"id": "x"}}))), "bad_body");
+        assert_eq!(code(publish(&mut f.db, &ann, "agent.put", serde_json::json!({"agent": {"id": "a\nb", "name": "Legal"}}))), "bad_body");
+        assert_eq!(code(publish(&mut f.db, &ann, "agent.drop", serde_json::json!({}))), "bad_body");
+        // Every other kind still needs its channel.
+        assert_eq!(code(publish(&mut f.db, &ann, "msg.post", serde_json::json!({"msg": {"id": "m", "text": "x"}}))), "bad_body");
     }
 
     #[test]

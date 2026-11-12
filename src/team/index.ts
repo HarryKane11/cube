@@ -1,5 +1,6 @@
 import { splitNotes } from "@/agents/notes";
 import { ensureSpace, inTauri, teamAsk, teamInfo, teamJoin, teamLeave, teamListen, teamPublish, teamStart } from "@/agents/runner";
+import { adopt as adoptOffer, offer, type SharedAgent } from "@/agents/subagents";
 import { AGENTS, ROUTER, agentById } from "@/agents/types";
 import { maskSecrets } from "@/lib/secrets";
 import { useCube, type Conv, type Msg } from "@/state/store";
@@ -8,6 +9,9 @@ import { applyEvent, inviteLink, postBody, shareable, type TeamEvent, type TeamM
 export * from "./events";
 
 const store = () => useCube.getState();
+
+/** How a message someone else wrote reaches the cubes. Set by whoever starts the team connection. */
+let onOutside: ((convId: string, msgId: string) => void) | undefined;
 
 /** Messages being published right now, so a slow answer does not send one twice. */
 const sending = new Set<string>();
@@ -36,9 +40,17 @@ function take(e: TeamEvent): void {
   if (!change) return;
   if (change.t === "conv") void adopt(change.sharedId, change.name);
   else if (change.t === "rename") s.renameConv(change.convId, change.name);
-  else if (change.t === "add") s.addMsg(change.msg);
+  else if (change.t === "add") {
+    s.addMsg(change.msg);
+    // A teammate's own words, written just now, in a channel where they may call this person's
+    // cubes. History being caught up after a reconnect is not a request.
+    const conv = s.convs.find((c) => c.id === change.msg.convId);
+    if (conv?.shared?.open && !change.msg.from?.agent && Date.now() - change.msg.ts < 120_000) onOutside?.(conv.id, change.msg.id);
+  }
   else if (change.t === "edit") s.patchMsg(change.id, { text: change.text, edited: true });
   else if (change.t === "delete") s.deleteMsg(change.id);
+  else if (change.t === "offer") s.setTeam({ agents: [...(s.team.agents ?? []).filter((a) => a.key !== change.agent.key), change.agent] });
+  else if (change.t === "withdraw") s.setTeam({ agents: (s.team.agents ?? []).filter((a) => a.key !== change.key) });
 }
 
 /** Publishes what was said in shared channels and has not gone out yet, and what was changed or deleted since. */
@@ -82,7 +94,8 @@ function later(): void {
 }
 
 /** Connects to the team this Cube has joined, if any, and keeps shared channels in step from then on. */
-export async function startTeam(): Promise<void> {
+export async function startTeam(outside?: (convId: string, msgId: string) => void): Promise<void> {
+  onOutside = outside;
   if (!inTauri) return;
   await teamListen((v) => {
     const s = store();
@@ -133,7 +146,9 @@ export async function startTeam(): Promise<void> {
 /** Accepts an invite link under a display name. */
 export async function joinTeam(link: string, name: string): Promise<void> {
   const info = await teamJoin(link, name);
-  store().setTeam({ info, head: 0, members: [], me: undefined });
+  // Only what the join itself tells. The relay's first greeting (who the members are) may
+  // already have arrived by now, and must not be wiped.
+  store().setTeam({ info });
 }
 
 /** Leaves the team: the key is deleted, and shared channels stay here as ordinary local ones. */
@@ -142,7 +157,8 @@ export async function leaveTeam(): Promise<void> {
   const s = store();
   for (const c of sharedConvs()) s.setConvShared(c.id, undefined);
   published.clear();
-  s.setTeam({ info: undefined, me: undefined, members: [], head: 0 });
+  s.setTeam({ info: undefined, me: undefined, members: [], head: 0, agents: [] });
+  for (const sub of s.subagents) if (sub.shared) s.putSubagent({ ...sub, shared: false });
   s.setTeamLive({ connected: false, problem: "", invite: undefined });
 }
 
@@ -155,10 +171,33 @@ export async function shareConv(convId: string): Promise<void> {
   store().setConvShared(convId, { id, since: Date.now() });
 }
 
+/** Lets teammates call this person's cubes in a channel they share, or stops that. */
+export function setConvOpen(convId: string, open: boolean): void {
+  const conv = store().convs.find((c) => c.id === convId);
+  if (conv?.shared) store().setConvShared(convId, { ...conv.shared, open });
+}
+
 /** Stops sending this channel's messages to the team. What was shared stays with the team. */
 export function unshareConv(convId: string): void {
   for (const [id, shared] of published) if (shared === store().convs.find((c) => c.id === convId)?.shared?.id) published.delete(id);
   store().setConvShared(convId, undefined);
+}
+
+/** Offers one of the person's sub-agents to the team, or takes the offer back. Teammates bring in a copy; nothing runs here for them. */
+export async function setSubagentShared(id: string, shared: boolean): Promise<void> {
+  const sub = store().subagents.find((s) => s.id === id);
+  if (!sub) return;
+  await teamPublish(shared ? "agent.put" : "agent.drop", shared ? offer(sub) : JSON.stringify({ id }));
+  const now = store().subagents.find((s) => s.id === id);
+  if (now) store().putSubagent({ ...now, shared });
+}
+
+/** Brings a teammate's sub-agent in as one of the person's own. It runs here, on the person's agent programs. */
+export async function adoptAgent(shared: SharedAgent): Promise<void> {
+  const s = store();
+  const sub = adoptOffer(shared, AGENTS.map((a) => a.name), [...AGENTS.map((a) => a.id), ...s.subagents.map((x) => x.id)]);
+  s.putSubagent(sub);
+  if (inTauri) store().setConvDir(`dm-${sub.id}`, await ensureSpace(`dm-${sub.id}`).catch(() => ""));
 }
 
 export const askInvite = () => teamAsk({ t: "invite.create" });

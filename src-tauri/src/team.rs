@@ -17,7 +17,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 const SERVICE: &str = "app.cube.desktop.team";
 const ACCOUNT: &str = "membership";
 /// The kinds of event this side will sign. Nothing else can be published through it.
-const KINDS: [&str; 4] = ["conv.put", "msg.post", "msg.edit", "msg.delete"];
+const KINDS: [&str; 6] = ["conv.put", "msg.post", "msg.edit", "msg.delete", "agent.put", "agent.drop"];
 /// What the webview may ask of the relay besides publishing.
 const ASKS: [&str; 7] = ["sync", "invite.create", "invite.list", "invite.revoke", "member.remove", "member.role", "member.rename"];
 

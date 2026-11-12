@@ -320,96 +320,65 @@ export function Stage() {
   // Tabs the person or an agent opened; whatever is in view always has one.
   const strip = current && !tabs.includes(current.rel) ? [...tabs, current.rel] : tabs;
   const hasTree = showTree && artifacts.length > 0;
-  const tool = "flex h-8 items-center gap-1.5 rounded-full bg-secondary px-3 text-[13px] font-semibold";
+  // Quiet controls: they show their shape only under the pointer, so the file is what the eye lands on.
+  const ghost = "flex size-8 flex-none items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground";
+  const pressed = "bg-secondary text-foreground";
 
   return (
     <section className="flex min-h-0 min-w-0 flex-col rounded-r-[22px] border bg-background px-4 pb-4" aria-label="Stage">
-      <header className="flex min-h-[62px] items-center gap-2 px-1 py-2.5" data-tauri-drag-region>
+      {/* One row for the whole panel: what is open, and the other things the Stage can show. What belongs to the file in view sits with the file, below. */}
+      <header className="flex min-h-[52px] items-center gap-1 px-0.5 py-2" data-tauri-drag-region>
         {artifacts.length > 0 && (
-          <button type="button" aria-label={showTree ? "Hide the file list" : "Show the file list"} title={showTree ? "Hide the file list" : "Show the file list"} aria-pressed={showTree} className="flex size-8 flex-none items-center justify-center rounded-full bg-secondary" onClick={() => setSetting("tree", !showTree)}>
+          <button type="button" aria-label={showTree ? "Hide the file list" : "Show the file list"} title={showTree ? "Hide the file list" : "Show the file list"} aria-pressed={showTree} className={cn(ghost, showTree && "text-foreground")} onClick={() => setSetting("tree", !showTree)}>
             <PanelIcon width={15} height={15} />
           </button>
         )}
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate font-heading text-[19px] font-bold leading-tight tracking-[-0.02em]">{onBrowser ? "Browser" : onScreen ? "Screen" : current ? current.rel : "Stage"}</h2>
-          <p className="truncate text-xs text-muted-foreground">
-            {onBrowser ? (
-              "Yours and the cubes' to use"
-            ) : onScreen ? (
-              <>
-                {follow ? `Watching ${follow.app}` : (lastShot?.label ?? "Watch a window live")}
-                {author && <> · {author.name}</>}
-                {(busy || follow) && <> · live</>}
-              </>
-            ) : current ? (
-              <>
-                {KIND_LABEL[current.kind]}
-                {author && <> · by {author.name}</>}
-                {change && <> · {change === "added" ? "new" : "changed"} since you last spoke</>}
-                {busy && <> · live</>}
-              </>
-            ) : (
-              "What your agents make shows up here"
-            )}
-          </p>
-        </div>
-        {author && <CubeStill color={author.color} size={28} />}
-        {options.length > 1 && current && (
-          <div className="flex flex-none rounded-[10px] bg-secondary p-0.5" role="group" aria-label="How to show this file">
-            {options.map((m) => (
-              <button type="button" key={m} aria-pressed={view === m} className={cn("h-7 rounded-lg px-2.5 text-[13px] font-medium text-muted-foreground", view === m && "bg-background font-semibold text-foreground shadow-sm")} onClick={() => setMode(conv.id, current.rel, m)}>
-                {MODE_NAME[m]}
-              </button>
-            ))}
-          </div>
-        )}
-        {inTauri && (
-          <>
-            <button type="button" aria-label="Screen" title="Screen: watch another app's window live" aria-pressed={onScreen} className={cn("flex size-8 flex-none items-center justify-center rounded-full bg-secondary", onScreen && "bg-foreground text-background")} onClick={() => select(conv.id, SCREEN, true)}>
-              <StageIcon width={15} height={15} />
-            </button>
-            <button type="button" aria-label="Browser" title="Browser" aria-pressed={onBrowser} className={cn("flex size-8 flex-none items-center justify-center rounded-full bg-secondary", onBrowser && "bg-foreground text-background")} onClick={() => select(conv.id, BROWSER, true)}>
-              <GlobeIcon width={15} height={15} />
-            </button>
-          </>
-        )}
-        <button type="button" aria-label={termOpen ? "Hide the terminal" : "Show the terminal"} title={termOpen ? "Hide the terminal" : "Show the terminal"} aria-pressed={termOpen} className={cn("flex size-8 flex-none items-center justify-center rounded-full bg-secondary", termOpen && "bg-foreground text-background")} onClick={() => setTermOpen(conv.id, !termOpen)}>
-          <TermIcon width={15} height={15} />
-        </button>
-        {current && inTauri && (
-          <button type="button" className={cn(tool, "flex-none")} onClick={() => void openPath(current.path)}>
-            <OpenIcon width={14} height={14} /> Open
-          </button>
-        )}
-        <button type="button" aria-label="Hide Stage" title="Hide Stage" className="flex size-8 flex-none items-center justify-center rounded-full bg-secondary" onClick={() => setStage(conv.id, "closed")}>
-          <CloseIcon width={14} height={14} />
-        </button>
-      </header>
-
-      {strip.length > 0 && (
-        <div className="flex gap-1 overflow-x-auto pb-3 [scrollbar-width:none]" role="tablist" aria-label="Open files">
+        {strip.length > 0 ? (
+          <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto [scrollbar-width:none]" role="tablist" aria-label="Open files">
           {strip.map((rel) => {
-            const virtual = rel === SCREEN || rel === BROWSER;
-            const a = virtual ? undefined : artifacts.find((x) => x.rel === rel);
-            if (!virtual && !a) return null;
-            const label = rel === BROWSER ? "Browser" : "Screen";
-            const on = rel === BROWSER ? onBrowser : rel === SCREEN ? onScreen : rel === current?.rel;
-            const unsaved = Boolean(a && dirty[a.path]);
-            return (
-              <div key={rel} className={cn("group/tab flex flex-none items-center rounded-xl text-[13px] font-medium", on ? "bg-foreground text-background" : "bg-muted text-muted-foreground hover:text-foreground")}>
-                <button type="button" role="tab" aria-selected={on} title={a ? rel : label} className="flex items-center gap-1.5 py-1 pl-1.5 pr-1" onClick={() => select(conv.id, rel, true)}>
-                  {a ? <Glyph kind={a.kind} name={a.rel} /> : <span className="glyph glyph-screen" aria-hidden="true"><i /></span>}
-                  {a ? a.rel.split("/").pop() : label}
-                </button>
-                <button type="button" aria-label={`Close ${a ? a.rel : label}${unsaved ? " (unsaved changes stay until you quit)" : ""}`} title={unsaved ? "Unsaved changes" : "Close"} className="mr-1 flex size-5 items-center justify-center rounded-md hover:bg-background/20" onClick={() => closeTab(conv.id, rel)}>
-                  {unsaved ? <span className="size-2 rounded-full bg-current group-hover/tab:hidden" /> : null}
-                  <CloseIcon width={11} height={11} className={cn(unsaved && "hidden group-hover/tab:block")} />
-                </button>
-              </div>
-            );
-          })}
+              const virtual = rel === SCREEN || rel === BROWSER;
+              const a = virtual ? undefined : artifacts.find((x) => x.rel === rel);
+              if (!virtual && !a) return null;
+              const label = rel === BROWSER ? "Browser" : "Screen";
+              const on = rel === BROWSER ? onBrowser : rel === SCREEN ? onScreen : rel === current?.rel;
+              const unsaved = Boolean(a && dirty[a.path]);
+              return (
+                <div key={rel} className={cn("group/tab flex flex-none items-center rounded-xl text-[13px] font-medium", on ? "bg-foreground text-background" : "bg-muted text-muted-foreground hover:text-foreground")}>
+                  <button type="button" role="tab" aria-selected={on} title={a ? rel : label} className="flex items-center gap-1.5 py-1 pl-1.5 pr-1" onClick={() => select(conv.id, rel, true)}>
+                    {a ? <Glyph kind={a.kind} name={a.rel} /> : <span className="glyph glyph-screen" aria-hidden="true"><i /></span>}
+                    {a ? a.rel.split("/").pop() : label}
+                  </button>
+                  <button type="button" aria-label={`Close ${a ? a.rel : label}${unsaved ? " (unsaved changes stay until you quit)" : ""}`} title={unsaved ? "Unsaved changes" : "Close"} className="mr-1 flex size-5 items-center justify-center rounded-md hover:bg-background/20" onClick={() => closeTab(conv.id, rel)}>
+                    {unsaved ? <span className="size-2 rounded-full bg-current group-hover/tab:hidden" /> : null}
+                    <CloseIcon width={11} height={11} className={cn(unsaved && "hidden group-hover/tab:block")} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <h2 className="min-w-0 flex-1 truncate px-1.5 text-[15px] font-semibold">{onBrowser ? "Browser" : onScreen ? "Screen" : "Stage"}</h2>
+        )}
+        <div className="flex flex-none items-center">
+          {inTauri && (
+            <>
+              <button type="button" aria-label="Screen" title="Screen: watch another app's window live" aria-pressed={onScreen} className={cn(ghost, onScreen && pressed)} onClick={() => select(conv.id, SCREEN, true)}>
+                <StageIcon width={15} height={15} />
+              </button>
+              <button type="button" aria-label="Browser" title="Browser" aria-pressed={onBrowser} className={cn(ghost, onBrowser && pressed)} onClick={() => select(conv.id, BROWSER, true)}>
+                <GlobeIcon width={15} height={15} />
+              </button>
+            </>
+          )}
+          <button type="button" aria-label={termOpen ? "Hide the terminal" : "Show the terminal"} title={termOpen ? "Hide the terminal" : "Show the terminal"} aria-pressed={termOpen} className={cn(ghost, termOpen && pressed)} onClick={() => setTermOpen(conv.id, !termOpen)}>
+            <TermIcon width={15} height={15} />
+          </button>
+          <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
+          <button type="button" aria-label="Hide Stage" title="Hide Stage" className={ghost} onClick={() => setStage(conv.id, "closed")}>
+            <CloseIcon width={14} height={14} />
+          </button>
         </div>
-      )}
+      </header>
 
       <div className={cn("flex min-h-0 flex-1", !hasTree && "gap-3")}>
         {hasTree && (
@@ -421,8 +390,44 @@ export function Stage() {
           </>
         )}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
-        <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-[18px] border">
-          <div className="size-full overflow-auto">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[18px] border">
+          {/* About the file in view, and what can be done with it. */}
+          {(current || onScreen) && (
+            <div className="flex h-10 flex-none items-center gap-2 border-b pl-3 pr-1.5 text-[13px]">
+              {author && <CubeStill color={author.color} size={18} />}
+              <p className="min-w-0 flex-1 truncate text-muted-foreground" title={current ? current.rel : undefined}>
+                {onScreen ? (
+                  <>
+                    {follow ? `Watching ${follow.app}` : (lastShot?.label ?? "Watch a window live")}
+                    {author && <> · {author.name}</>}
+                    {(busy || follow) && <> · live</>}
+                  </>
+                ) : current ? (
+                  <>
+                    {KIND_LABEL[current.kind]}
+                    {author && <> · by {author.name}</>}
+                    {change && <> · <span title={change === "added" ? "New since you last spoke" : "Changed since you last spoke"}>{change === "added" ? "new" : "changed"}</span></>}
+                    {busy && <> · live</>}
+                  </>
+                ) : null}
+              </p>
+              {options.length > 1 && current && (
+                <div className="flex flex-none rounded-lg bg-secondary p-0.5" role="group" aria-label="How to show this file">
+                  {options.map((m) => (
+                    <button type="button" key={m} aria-pressed={view === m} className={cn("h-6 rounded-md px-2 text-xs font-medium text-muted-foreground", view === m && "bg-background font-semibold text-foreground shadow-sm")} onClick={() => setMode(conv.id, current.rel, m)}>
+                      {MODE_NAME[m]}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {current && inTauri && (
+                <button type="button" className="flex h-7 flex-none items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground" title="Open in its own app" onClick={() => void openPath(current.path)}>
+                  <OpenIcon width={13} height={13} /> Open
+                </button>
+              )}
+            </div>
+          )}
+          <div className="min-h-0 w-full flex-1 overflow-auto">
             {onBrowser ? (
               <Suspense fallback={<p className="p-6 text-muted-foreground">Opening the browser…</p>}>
                 <BrowserPane />

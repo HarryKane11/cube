@@ -45,6 +45,8 @@ export function RoleEngines() {
   const setEngine = useCube((s) => s.setEngine);
   const openProfile = useCube((s) => s.openProfile);
   const onboarded = useCube((s) => s.onboarded);
+  // The roster grows when the person makes a sub-agent.
+  useCube((s) => s.subagents);
   return (
     <ul className="flex flex-col">
       {AGENTS.map((a) => {

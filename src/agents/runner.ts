@@ -200,6 +200,25 @@ export const libraryProgram = (program: string) => invoke<ProgramLibrary>("libra
 /** The text of a skill or note the library lists. Markdown in the programs' folders and Cube's knowledge folder only. */
 export const libraryRead = (path: string) => invoke<string>("library_read", { path });
 
+/** Saves the person's Slack app tokens in the Keychain, after trying them once. They never come back to the webview. */
+export const slackSet = (bot: string, app: string) => invoke<void>("slack_set", { bot, app });
+export const slackConfigured = () => invoke<boolean>("slack_configured");
+export const slackClear = () => invoke<void>("slack_clear");
+export const slackStart = () => invoke<void>("slack_start");
+/** Posts into a Slack thread; resolves with the new message's timestamp. */
+export const slackPost = (channel: string, threadTs: string, text: string) => invoke<string>("slack_post", { channel, threadTs, text });
+export const slackUser = (user: string) => invoke<string>("slack_user", { user });
+/** Hears the Slack connection's state and the messages written to the Cube bot. */
+/** The permissions the Slack app was installed with. */
+export const slackScopes = () => invoke<string[]>("slack_scopes");
+/** Puts a picture inside ~/CubeSpaces into a Slack thread. */
+export const slackUpload = (channel: string, threadTs: string, path: string, title: string) => invoke<void>("slack_upload", { channel, threadTs, path, title });
+/** Has Codex's image tool draw a picture into `<dir>/pictures`. Returns the file's path. Takes a minute or two. */
+export const drawPicture = (id: string, dir: string, name: string, description: string) => invoke<string>("draw_picture", { id, dir, name, description });
+/** What the drawing is doing right now, as short lines, each with the id its request was made with. */
+export const pictureListen = (on: (v: { id: string; text: string }) => void) => listen<{ id: string; text: string }>("picture-ev", (e) => on(e.payload));
+export const slackListen = (on: (v: Record<string, unknown> & { t: string }) => void) => listen<Record<string, unknown> & { t: string }>("slack-ev", (e) => on(e.payload));
+
 /** An agent card, as the text the address returned. */
 export const remoteCard = (url: string) => invoke<string>("remote_card", { url });
 /** Saves a remote agent's credential in the Keychain, tied to the address it is for. It never comes back to the webview. */

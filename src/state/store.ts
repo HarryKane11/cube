@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { Manifest } from "../agents/custom";
 import type { RemoteAgent } from "../agents/remote/a2a";
+import { ownColor, toDef, type SharedAgent, type SubAgent } from "../agents/subagents";
 import type { HeadlessEngine } from "../agents/headless";
 import type { JobKind, JobRun } from "../knowledge/jobs";
 import type { TeamMember } from "../team/events";
@@ -9,7 +10,7 @@ import type { Decision, Note, PlanStep } from "../agents/notes";
 import type { Question } from "../agents/permissions";
 import type { Branch } from "../agents/trees";
 import type { ActKind, AgentKind, Mode, Palette, RunOpts, Status, Trust } from "../agents/types";
-import { AGENTS, ORCH, ROUTER, applyPalettes, isLeadRole } from "../agents/types";
+import { AGENTS, ORCH, ROUTER, applyPalettes, isLeadRole, setSubagents } from "../agents/types";
 import type { Lang } from "../i18n";
 import { kindOf, type FileKind } from "../lib/files";
 import type { Schedule } from "../lib/schedule";
@@ -24,13 +25,34 @@ export interface Conv {
   members: string[];
   dir: string;
   createdAt: number;
-  /** Shared with the team: its id on the relay, and since when what is said here goes out. */
-  shared?: { id: string; since: number };
+  /**
+   * Shared with the team: its id on the relay, and since when what is said here goes out.
+   * `open` lets teammates call this person's cubes here by naming them, and lets the Router
+   * decide whether a teammate's message wants an answer.
+   */
+  shared?: { id: string; since: number; open?: boolean };
 }
 
 export interface Act {
   kind: ActKind;
   label: string;
+}
+
+/** A helper at work for a cube: who it is, what it runs on, what it last said, and what came of it. */
+export interface Helper {
+  name: string;
+  engine: AgentKind;
+  state: "working" | "done" | "failed";
+  /** What it reported while working, oldest first. The last line is what it is doing now. */
+  said: string[];
+  startedAt: number;
+  took?: number;
+  /** What it made: a path inside the conversation's folder, and the file's full path. */
+  rel?: string;
+  path?: string;
+  error?: string;
+  /** For a request from Slack: "sent" once what it made is in the thread, or why it is not. */
+  posted?: string;
 }
 
 /** Something an agent wants to do that needs the person's OK. */
@@ -102,6 +124,16 @@ export interface Msg {
   from?: { pubkey: string; name: string; agent?: string };
   /** For a message of ours in a shared channel: the text the team has. */
   sent?: string;
+  /**
+   * A request that came from Slack: the channel and thread its answers go back to. `called` is
+   * false for a reply in a thread the team is already in that does not mention the bot: the
+   * Router decides whether it wants an answer.
+   */
+  slack?: { channel: string; ts: string; called?: boolean };
+  /** Someone a cube brought in for part of the job, such as the image model that draws its picture. Shown working under the message. */
+  helper?: Helper;
+  /** For a cube's answer to a Slack request: set once it has been posted there. */
+  slackSent?: string;
   /** How long the agent worked on this, in milliseconds. */
   took?: number;
   /** What the run used, when the engine reports it. */
@@ -204,6 +236,18 @@ export interface Settings {
   notify: boolean;
 }
 
+/** Puts the person's sub-agents on the team roster, each with a color no other cube has. */
+function syncSubagents(subs: SubAgent[]): void {
+  setSubagents([]);
+  const taken = AGENTS.map((a) => a.color);
+  const defs = subs.map((sub) => {
+    const color = ownColor(sub.palette[0], taken);
+    taken.push(color);
+    return toDef(sub, color);
+  });
+  setSubagents(defs);
+}
+
 /** How Cube keeps its memory, skills and wiki. */
 export interface KnowledgeState {
   /** The agent program background work runs on. Empty until the person picks one; nothing runs by itself before that. */
@@ -271,10 +315,14 @@ interface CubeState {
   customs: Manifest[];
   /** Role id → the custom agent that powers it, when the role runs on one. */
   customFor: Record<string, string>;
-  /** The team this Cube has joined, as the relay last described it. */
-  team: { info?: { host: string; ws: string; workspace: string; pubkey: string }; me?: { name: string; role: TeamMember["role"] }; members: TeamMember[]; head: number };
+  /** Sub-agents the person made, or brought in from a teammate. They join the team beside the built-in roles. */
+  subagents: SubAgent[];
+  /** The team this Cube has joined, as the relay last described it. `agents` are the sub-agents teammates offer. */
+  team: { info?: { host: string; ws: string; workspace: string; pubkey: string }; me?: { name: string; role: TeamMember["role"] }; members: TeamMember[]; head: number; agents?: SharedAgent[] };
   /** The connection to the relay right now. Not kept across restarts. */
   teamLive: { connected: boolean; problem: string; invite?: string };
+  /** The connection to Slack right now. Not kept across restarts. */
+  slackLive: { configured: boolean; connected: boolean; team: string; problem: string; /** Permissions the Slack app lacks for what Cube does there. */ missing?: string[] };
   /** How Cube keeps its memory, skills and wiki, and what the background jobs have done. */
   knowledge: KnowledgeState;
   /** The job running right now, if one is. Not kept across restarts. */
@@ -341,10 +389,15 @@ interface CubeState {
   setPalette(agentId: string, colors: Palette | undefined): void;
   setCustoms(list: Manifest[]): void;
   setCustomFor(agentId: string, id: string): void;
+  /** Adds a sub-agent or replaces the one with its id, and gives it a direct message and a place in every channel. */
+  putSubagent(sub: SubAgent): void;
+  /** Takes a sub-agent off the team. What it wrote stays. */
+  removeSubagent(id: string): void;
   setTeam(patch: Partial<CubeState["team"]>): void;
   setTeamLive(patch: Partial<CubeState["teamLive"]>): void;
   setConvShared(convId: string, shared: Conv["shared"]): void;
   renameConv(convId: string, name: string): void;
+  setSlackLive(patch: Partial<CubeState["slackLive"]>): void;
   setKnowledge(patch: Partial<KnowledgeState>): void;
   setKnowledgeBusy(busy: { job: JobKind; since: number; activity: string } | undefined): void;
   setKnowledgePlace(dir: string, count: number): void;
@@ -447,8 +500,10 @@ export const useCube = create<CubeState>()(
       customFor: {},
       remotes: [],
       remoteFor: {},
+      subagents: [],
       team: { members: [], head: 0 },
       teamLive: { connected: false, problem: "" },
+      slackLive: { configured: false, connected: false, team: "", problem: "" },
       knowledge: { engine: "", model: "", auto: true, last: {}, cursor: { memory: 0, skills: 0 }, memoryChangedAt: 0, imported: false, runs: [] },
       knowledgeBusy: undefined,
       knowledgeDir: "",
@@ -502,10 +557,34 @@ export const useCube = create<CubeState>()(
         }),
       setCustoms: (customs) => set({ customs }),
       setCustomFor: (agentId, id) => set((s) => ({ customFor: { ...s.customFor, [agentId]: id } })),
+      putSubagent: (sub) =>
+        set((s) => {
+          const fresh = !s.subagents.some((x) => x.id === sub.id);
+          const subagents = fresh ? [...s.subagents, sub] : s.subagents.map((x) => (x.id === sub.id ? sub : x));
+          syncSubagents(subagents);
+          if (!fresh) return { subagents, convs: s.convs.map((c) => (c.id === `dm-${sub.id}` ? { ...c, name: sub.name } : c)) };
+          const dm: Conv = { id: `dm-${sub.id}`, kind: "dm", name: sub.name, members: [sub.id], dir: "", createdAt: Date.now() };
+          return {
+            subagents,
+            live: { ...s.live, [sub.id]: { status: "idle" as Status, statement: "" } },
+            convs: [...s.convs.map((c) => (c.kind === "channel" && !c.members.includes(sub.id) ? { ...c, members: [...c.members, sub.id] } : c)), dm],
+          };
+        }),
+      removeSubagent: (id) =>
+        set((s) => {
+          const subagents = s.subagents.filter((x) => x.id !== id);
+          syncSubagents(subagents);
+          return {
+            subagents,
+            convs: s.convs.filter((c) => c.id !== `dm-${id}`).map((c) => (c.members.includes(id) ? { ...c, members: c.members.filter((m) => m !== id) } : c)),
+            activeId: s.activeId === `dm-${id}` ? "general" : s.activeId,
+          };
+        }),
       setTeam: (patch) => set((s) => ({ team: { ...s.team, ...patch } })),
       setTeamLive: (patch) => set((s) => ({ teamLive: { ...s.teamLive, ...patch } })),
       setConvShared: (convId, shared) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, shared } : c)) })),
       renameConv: (convId, name) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, name } : c)) })),
+      setSlackLive: (patch) => set((s) => ({ slackLive: { ...s.slackLive, ...patch } })),
       setKnowledge: (patch) => set((s) => ({ knowledge: { ...s.knowledge, ...patch } })),
       setKnowledgeBusy: (knowledgeBusy) => set({ knowledgeBusy }),
       setKnowledgePlace: (knowledgeDir, knowledgeCount) => set({ knowledgeDir, knowledgeCount }),
@@ -708,6 +787,7 @@ export const useCube = create<CubeState>()(
         customFor: s.customFor,
         remotes: s.remotes,
         knowledge: s.knowledge,
+        subagents: s.subagents,
         team: s.team,
         remoteFor: s.remoteFor,
         trees: s.trees,
@@ -727,6 +807,8 @@ export const useCube = create<CubeState>()(
           c.kind === "channel" ? { ...c, members: [...[ROUTER, ORCH].filter((id) => !c.members.includes(id)), ...c.members] } : c,
         );
         applyPalettes(p.palettes ?? {});
+        // The sub-agents the person made are back on the team before anything looks one up.
+        syncSubagents(p.subagents ?? []);
         return {
           ...current,
           ...p,

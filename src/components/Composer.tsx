@@ -5,7 +5,7 @@ import { MODES, agentById, type AgentDef, type Mode } from "@/agents/types";
 import { AtIcon, ChevronIcon, ClipIcon, CloseIcon, MicIcon, SendIcon, StopIcon } from "@/components/icons";
 import { kindOf } from "@/lib/files";
 import { PromptInput, PromptInputActions, PromptInputTextarea } from "@/components/ui/prompt-input";
-import { TextShimmer } from "@/components/ui/text-shimmer";
+import { Rolling } from "@/components/Rolling";
 import { Cube, CubeStill } from "@/cube/Cube";
 import { cn } from "@/lib/utils";
 import { useBusy, useCube, type Conv } from "@/state/store";
@@ -23,7 +23,7 @@ function NowWorking({ conv }: { conv: Conv }) {
       {working.map((a) => (
         <div className="flex min-w-0 items-center gap-1.5" key={a.id}>
           <Cube color={a.color} status={live[a.id].status} size={26} />
-          <TextShimmer className="truncate text-[13px]" duration={2.4}>{live[a.id].statement}</TextShimmer>
+          <Rolling className="text-[13px]" duration={2.4} text={live[a.id].statement} />
         </div>
       ))}
     </div>

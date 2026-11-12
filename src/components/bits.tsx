@@ -48,8 +48,8 @@ export function timeOf(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-const NAMES = [...AGENTS.map((a) => a.name), "You"].join("|");
-const MENTION = new RegExp(`@(${NAMES})\\b`, "gi");
+/** Matches a mention of anyone on the team as it is now, sub-agents included. */
+const mention = () => new RegExp(`@(${[...AGENTS.map((a) => a.name), "You"].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\p{L}\\p{N}])`, "giu");
 
 function Anchor({ href, children }: ComponentProps<"a">) {
   if (href === "#mention") return <span className="at">{children}</span>;
@@ -73,7 +73,7 @@ const COMPONENTS = { a: Anchor };
 export function RichText({ text, className }: { text: string; className?: string }) {
   return (
     <Markdown className={cn("md", className)} components={COMPONENTS}>
-      {text.replace(MENTION, (m) => `[${m}](#mention)`)}
+      {text.replace(mention(), (m) => `[${m}](#mention)`)}
     </Markdown>
   );
 }

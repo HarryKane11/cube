@@ -55,6 +55,14 @@ enum Command {
     Edit { conv: String, msg_id: String, text: String },
     /// Delete a message.
     Delete { conv: String, msg_id: String },
+    /// Offer a sub-agent to the team (publishes agent.put).
+    Agent {
+        id: String,
+        name: String,
+        brief: String,
+        #[arg(long, default_value = "")]
+        instructions: String,
+    },
     /// Print every event and member-list frame as one JSON line until killed.
     Listen {
         /// First replay history after this sequence number (0 for everything).
@@ -395,6 +403,10 @@ async fn run(cli: Cli) -> Res<Value> {
         Command::Delete { conv, msg_id } => {
             let body = json!({"conv": conv, "id": msg_id});
             published(&cli, "msg.delete", body, json!({"conv": conv, "msg_id": msg_id})).await
+        }
+        Command::Agent { id, name, brief, instructions } => {
+            let agent = json!({"id": id, "name": name, "role": "", "brief": brief, "instructions": instructions, "palette": ["#1FA864", "#9BE15D", "#12B5CB"]});
+            published(&cli, "agent.put", json!({"agent": agent}), json!({"agent": id})).await
         }
         Command::Listen { from } => listen(&cli, *from).await,
         Command::Invite { role } => {

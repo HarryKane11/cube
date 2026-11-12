@@ -24,6 +24,10 @@ export interface AgentDef {
   keywords: string[];
   /** Sticker colors mixed across every face, for a cube that stands for the whole team. */
   mosaic?: string[];
+  /** For a sub-agent the person made: how it should go about its work, told to it at the start of a conversation. */
+  instructions?: string;
+  /** A sub-agent the person made, as opposed to a role Cube comes with. */
+  custom?: boolean;
 }
 
 /** The role that reads a request nobody was named in and passes it on: to one teammate, or to the Orchestrator when it takes a team. */
@@ -185,12 +189,12 @@ export const MODEL_HINTS: Record<AgentKind, string[]> = {
   api: ["anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5", "anthropic/claude-haiku-5-5", "anthropic/claude-fable-5-2", "openai/", "openrouter/"],
 };
 
-export const AGENTS: AgentDef[] = [
+const BUILT_IN: AgentDef[] = [
   {
     id: ROUTER,
     name: "Router",
-    role: "Sends each request to the right cube",
-    brief: "You read a request nobody was named in and pass it to the one teammate who should do it, or to the Orchestrator when it takes several.",
+    role: "Answers about Cube and brings in the right cube",
+    brief: "You are the front desk: you answer general questions about Cube and the team, and for a request nobody was named in you bring in the one teammate who should do it, or the Orchestrator when it takes several.",
     color: "#3A3A3C",
     palette: ["#48484A", "#8E8E93", "#2C2C2E"],
     prefers: ["codex", "claude", "hermes"],
@@ -260,6 +264,18 @@ export const AGENTS: AgentDef[] = [
     keywords: ["review", "check", "test", "verify", "audit", "qa", "proofread", "리뷰", "검토", "확인", "테스트", "검증", "점검"],
   },
 ];
+
+/**
+ * Everyone on the team: the built-in roles, then the sub-agents the person made. The list is
+ * kept current by `setSubagents`; read it when you need it instead of holding on to a copy.
+ */
+export const AGENTS: AgentDef[] = [...BUILT_IN];
+
+/** Puts the person's sub-agents on the team, replacing the ones that were there. */
+export function setSubagents(defs: AgentDef[]): void {
+  AGENTS.splice(BUILT_IN.length, AGENTS.length - BUILT_IN.length, ...defs);
+}
+
 
 export function agentById(id: string): AgentDef | undefined {
   return AGENTS.find((a) => a.id === id);

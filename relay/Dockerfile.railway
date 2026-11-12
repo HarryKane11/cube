@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+#
+# The relay for Railway. It differs from ./Dockerfile only where Railway does:
+#   - no cache mounts (Railway wants its own id on each one) and no VOLUME line:
+#     the database lives on a Railway volume mounted at /data;
+#   - it runs as root, because Railway mounts volumes for root and a volume
+#     that the relay cannot write would lose every message on the next deploy;
+#   - it listens on the port Railway hands it in PORT.
+# Set CUBE_RELAY_PUBLIC_HOST to the service's public domain. See README.md.
+
+# ---- build ---------------------------------------------------------------
+FROM rust:1-slim-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY proto ./proto
+COPY server ./server
+RUN cargo build --release --locked -p cube-relay --bin cube-relay \
+ && cp target/release/cube-relay /usr/local/bin/cube-relay
+
+# ---- run -----------------------------------------------------------------
+FROM debian:bookworm-slim
+RUN mkdir -p /data && chmod 700 /data
+COPY --from=build /usr/local/bin/cube-relay /usr/local/bin/cube-relay
+WORKDIR /data
+ENV CUBE_RELAY_DB=/data/cube-relay.db
+EXPOSE 8484
+# The port comes from Railway at start, so the address is put together here.
+# `cube-relay owner-invite` in a shell on the service reads the same database.
+CMD ["/bin/sh", "-c", "CUBE_RELAY_BIND=0.0.0.0:${PORT:-8484} exec cube-relay"]

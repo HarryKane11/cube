@@ -63,6 +63,20 @@ describe("applyEvent", () => {
   });
 });
 
+describe("sub-agents offered to the team", () => {
+  const agent = { id: "sub-legal", name: "Legal", role: "Reviewer", brief: "Reads contracts.", instructions: "Quote clauses.", palette: ["#112233", "#445566", "#778899"] };
+  it("lists a teammate's offer under their key, and takes it back only when they say so", () => {
+    expect(applyEvent(ev("agent.put", { agent }), world())).toMatchObject({ t: "offer", agent: { key: `${BEA}:sub-legal`, byName: "Bea", name: "Legal" } });
+    expect(applyEvent(ev("agent.drop", { id: "sub-legal" }), world())).toEqual({ t: "withdraw", key: `${BEA}:sub-legal` });
+    // Someone else dropping the same id withdraws only their own, which is another key.
+    expect(applyEvent(ev("agent.drop", { id: "sub-legal" }, CY), world())).toEqual({ t: "withdraw", key: `${CY}:sub-legal` });
+  });
+  it("ignores malformed offers and our own", () => {
+    expect(applyEvent(ev("agent.put", { agent: { ...agent, name: "two words" } }), world())).toBeNull();
+    expect(applyEvent(ev("agent.put", { agent }, ME), world())).toBeNull();
+  });
+});
+
 describe("names", () => {
   it("adds the start of the key when two members share a name, and says so for a stranger", () => {
     expect(nameOf(BEA, members)).toBe("Bea");

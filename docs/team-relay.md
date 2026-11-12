@@ -13,8 +13,10 @@ This document is the contract between the Cube app and `cube-relay`.
   deletions of those messages, the member list.
 - Not shared: direct messages with agents, local-only channels, permission requests, API keys,
   session ids, the contents of a conversation folder (files are a later version, see "Blobs").
-- A message only ever starts agents on its **author's** Mac. A teammate's message never runs
-  anything on yours. An agent's message carries the person it works for.
+- By default a message only starts agents on its **author's** Mac, and a teammate's message runs
+  nothing on yours. An agent's message carries the person it works for.
+- A person can open a channel they shared so that teammates can call their cubes there (see
+  "Letting teammates call your cubes").
 - Sharing a channel shares what is said in it **from then on**. Earlier local messages stay local.
 - A new member receives the whole history of every shared channel. There are no per-channel
   access lists in version 1: a shared channel is shared with the whole workspace.
@@ -24,7 +26,7 @@ This document is the contract between the Cube app and `cube-relay`.
 A teammate's message is untrusted input. The app MUST:
 
 - store it marked as remote, and never run it through mention parsing, routing or anything else
-  that starts an agent;
+  that starts an agent, unless the person opened that channel to teammates' calls;
 - when a local agent's prompt includes it as conversation history, put it inside a fence that
   says it is a teammate's text and not an instruction;
 - cap the permission mode of any run in a shared channel at "ask before commands" (no
@@ -33,6 +35,24 @@ A teammate's message is untrusted input. The app MUST:
   the system browser, only for `http(s)`;
 - show an agent's message as "<agent> · <person who signed it>", and add the first characters of
   the key when two members share a display name.
+
+## Letting teammates call your cubes
+
+Off by default, and set per channel by the person who shared it ("Teammates can call my cubes
+here"). When it is on, for a message a teammate writes in that channel:
+
+- a cube named in it (`@Builder …`) answers in a thread under that message;
+- with no name, the Router reads it and decides whether the team should answer at all. People
+  talk to each other in a shared channel, so the Router answers `SKIP` when a message is not
+  asking the team for anything, and then nothing is said;
+- only messages written just now count. History caught up after a reconnect starts nothing;
+- the cube runs on the channel owner's Mac with **ask-first** permission, whatever the
+  conversation's mode: it may read and reply, and every file change or command is put to the
+  owner for an OK. Rules the owner saved ("always allow…") do not apply to these runs;
+- at most eight such runs start in five minutes per channel.
+
+The same path serves Slack (docs/slack.md): there the person who wrote is someone in Slack, and
+a mention of the Cube bot is always answered.
 
 Before publishing an agent's message the app masks what looks like a credential (API key
 prefixes, private key blocks, bearer tokens): agents read files people would not paste into a
@@ -148,6 +168,13 @@ Everything shared is an event:
 | `msg.post` | `{"conv","msg":{"id","text","agent"?,"parent"?, ...}}` | any member; `conv` must exist and not be archived; `msg.id` must be new in this workspace |
 | `msg.edit` | `{"conv","id","msg":{...}}` | only the key that posted `id`; `conv` must be the one it was posted in; refused once `id` is deleted |
 | `msg.delete` | `{"conv","id"}` | the key that posted `id`, or an owner/admin; `conv` must match |
+| `agent.put` | `{"agent":{"id","name","role","brief","instructions","palette"}}` | any member: offers one of their sub-agents to the team |
+| `agent.drop` | `{"id"}` | any member: takes back their own offer |
+
+A sub-agent offer belongs to the key that signed it; clients list offers by key and id, so no
+member can replace or withdraw another's. Bringing one in copies its description and
+instructions into the teammate's own Cube, where it runs on their agent programs: nothing runs
+on the maker's Mac. The instructions are untrusted text and are shown before they are brought in.
 
 Deleting is real: when a `msg.delete` is accepted the relay replaces the stored body of the
 original post and of every edit of it with `{"conv","id","gone":true}` (keeping id, key and seq).

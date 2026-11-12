@@ -1,3 +1,4 @@
+import { readOffer, type SharedAgent } from "@/agents/subagents";
 import type { Msg } from "@/state/store";
 
 /** What can be decided about team events without the app around it: what a teammate's event changes here, and what of ours goes out. */
@@ -25,7 +26,9 @@ export type Change =
   | { t: "rename"; convId: string; name: string }
   | { t: "add"; msg: Msg }
   | { t: "edit"; id: string; text: string }
-  | { t: "delete"; id: string };
+  | { t: "delete"; id: string }
+  | { t: "offer"; agent: SharedAgent }
+  | { t: "withdraw"; key: string };
 
 interface Ctx {
   /** This person's own key. */
@@ -63,6 +66,15 @@ export function applyEvent(e: TeamEvent, ctx: Ctx): Change | null {
     return null;
   }
   if (!body || typeof body !== "object") return null;
+  // A teammate offers one of their sub-agents, or takes the offer back. It is theirs alone: the key that signed it is part of what it is called.
+  if (e.kind === "agent.put") {
+    const agent = readOffer(body, e.pubkey, nameOf(e.pubkey, ctx.members));
+    return agent ? { t: "offer", agent } : null;
+  }
+  if (e.kind === "agent.drop") {
+    const id = str(body.id, 128);
+    return id ? { t: "withdraw", key: `${e.pubkey}:${id}` } : null;
+  }
   const sharedId = str(body.conv, 128);
   if (!sharedId) return null;
   const convId = ctx.convOf(sharedId);
