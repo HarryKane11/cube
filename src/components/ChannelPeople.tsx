@@ -41,7 +41,7 @@ export function ChannelPeople({ conv, open, onOpenChange }: { conv: Conv; open: 
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[80vh] overflow-auto sm:max-w-[480px]">
+      <DialogContent className="max-h-[80vh] overflow-auto *:min-w-0 sm:max-w-[480px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {shared?.private ? <LockIcon width={16} height={16} /> : <PeopleIcon width={16} height={16} />}

@@ -43,22 +43,22 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
       {dm ? <Cube color={dm.color} status={live[dm.id]?.status ?? "idle"} size={40} /> : conv.person ? (
         <Face pubkey={conv.person.pubkey} name={conv.name} size={36} />
       ) : <HashIcon className="text-muted-foreground" width={22} height={22} />}
-      <div className="min-w-0 flex-1">
-        <h1 className="flex items-center gap-2 truncate font-heading text-[19px] font-bold leading-tight tracking-[-0.02em]">
-          <span className="truncate">{conv.name}</span>
-          {conv.shared && !conv.person && (
-            <button type="button" className="flex h-5 flex-none items-center gap-1 rounded-full bg-primary/15 px-2 text-[11px] font-semibold tracking-normal text-primary" title={conv.shared.private ? "Only the people invited into this channel see it. Cubes here ask before they run anything." : "What is said here goes to everyone in your team. Cubes here ask before they run anything."} onClick={() => setPeople(true)}>
-              {conv.shared.private ? <><LockIcon width={12} height={12} /> Private</> : <><PeopleIcon width={12} height={12} /> Shared with team</>}
-            </button>
-          )}
-        </h1>
+      {/* The name keeps a width of its own: with people, Invite and Copies beside it, it is the cubes on the right that give way. */}
+      <div className="min-w-[112px] flex-1">
+        <h1 className="truncate font-heading text-[19px] font-bold leading-tight tracking-[-0.02em]">{conv.name}</h1>
         {dm ? (
           <p className="flex items-center gap-1 text-xs text-muted-foreground">
             {dm.role} · runs on <EngineLabel agent={dm} />
           </p>
         ) : (
-          <p className="truncate text-xs text-muted-foreground">
-            {conv.person ? "Direct message. Your cubes answer here only when you name one with @." : <>{members.map((m) => m.name).join(", ")} and you</>}
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            {/* Who sees the channel sits under its name, so the name itself is never squeezed out. */}
+            {conv.shared && !conv.person && (
+              <button type="button" className="flex h-[18px] flex-none items-center gap-1 rounded-full bg-primary/15 px-1.5 text-[11px] font-semibold text-primary" title={conv.shared.private ? "Only the people invited into this channel see it. Cubes here ask before they run anything." : "What is said here goes to everyone in your team. Cubes here ask before they run anything."} onClick={() => setPeople(true)}>
+                {conv.shared.private ? <><LockIcon width={11} height={11} /> Private</> : <><PeopleIcon width={11} height={11} /> Shared with team</>}
+              </button>
+            )}
+            <span className="truncate">{conv.person ? "Direct message. Your cubes answer here only when you name one with @." : <>{members.map((m) => m.name).join(", ")} and you</>}</span>
           </p>
         )}
       </div>
@@ -90,9 +90,9 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
         </button>
       )}
       {!dm && (
-        <div className="flex -space-x-2">
+        <div className="flex min-w-0 shrink -space-x-2 overflow-hidden">
           {members.map((m) => (
-            <button type="button" key={m.id} className="rounded-xl" aria-label={`Open ${m.name}'s profile`} title={m.name} onClick={() => openProfile(m.id)}>
+            <button type="button" key={m.id} className="flex-none rounded-xl" aria-label={`Open ${m.name}'s profile`} title={m.name} onClick={() => openProfile(m.id)}>
               <CubeStill color={m.color} size={30} />
             </button>
           ))}
