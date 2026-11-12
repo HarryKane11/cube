@@ -119,7 +119,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       {!inTauri && (
-        <div className="bg-foreground px-4 py-1 text-center text-xs text-background" role="status">
+        <div className="bg-foreground px-4 py-1 text-center text-xs text-background" role="status" data-preview-note>
           Preview in a browser: the agents here are scripted stand-ins. Open the Cube desktop app to work with real ones.
         </div>
       )}

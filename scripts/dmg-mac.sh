@@ -38,5 +38,11 @@ ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
 hdiutil create -volname "Cube" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 
+# The same image under a name that does not change from version to version, with its checksum:
+# these are the two files a release carries, and what the README's download link points at.
+cp -f "$DMG" "$OUT/Cube_universal.dmg"
+(cd "$OUT" && shasum -a 256 Cube_universal.dmg > Cube_universal.dmg.sha256)
+
 echo "dmg-mac: $DMG"
+echo "dmg-mac: $OUT/Cube_universal.dmg (+ .sha256), for a release"
 echo "dmg-mac: signed as $(codesign -dr - "$APP" 2>&1 | sed -n 's/^designated => //p')"
