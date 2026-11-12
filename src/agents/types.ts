@@ -296,6 +296,15 @@ export function applyPalettes(next: Record<string, Palette>): void {
 }
 
 /** Sticker colors for a cube: the person's choice for that role, the role's own palette, or tints of a single color. */
+/**
+ * Whether a cube that names the Orchestrator in its reply starts it. The Router always does.
+ * A teammate does too, unless it is working on a plan of the Orchestrator's: then the
+ * Orchestrator is called back by itself once everyone it named has finished, and a second call
+ * would start it twice. Without a plan (the Orchestrator handed one thing straight over, or the
+ * person asked the teammate themselves) nothing else would ever bring it back.
+ */
+export const mayCallLead = (isRouter: boolean, inPlan: boolean): boolean => isRouter || !inPlan;
+
 export function paletteOf(color: string): Palette | null {
   const agent = AGENTS.find((a) => a.color.toLowerCase() === color.toLowerCase());
   return agent ? (picked[agent.id] ?? agent.palette) : null;

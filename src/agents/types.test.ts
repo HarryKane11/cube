@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AGENTS, agentById, paletteOf, pickEngine, route } from "./types";
+import { AGENTS, agentById, mayCallLead, paletteOf, pickEngine, route } from "./types";
 
 const everyone = AGENTS.map((a) => a.id);
 
@@ -55,5 +55,22 @@ describe("keyword routing, used when there is no Router", () => {
     // "탐색" (explore) has "색" (color) in it, which used to send this to the Designer.
     expect(route("피클이라는 에이전트 관련 여론은 dc에서 탐색해볼래?", members)).toBe("researcher");
     expect(route("버튼 색상을 바꿔줘", members)).toBe("designer");
+  });
+});
+
+describe("who may call the Orchestrator by naming it", () => {
+  it("lets the Router, always", () => {
+    expect(mayCallLead(true, false)).toBe(true);
+    expect(mayCallLead(true, true)).toBe(true);
+  });
+
+  it("lets a teammate when no plan would bring the Orchestrator back", () => {
+    // The Orchestrator handed one thing straight over, or the person asked the teammate themselves.
+    expect(mayCallLead(false, false)).toBe(true);
+  });
+
+  it("does not start it twice for a teammate working on its plan", () => {
+    // It is called back by itself when everyone it named has finished.
+    expect(mayCallLead(false, true)).toBe(false);
   });
 });

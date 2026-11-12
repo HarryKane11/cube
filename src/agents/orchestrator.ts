@@ -17,7 +17,7 @@ import { allowedBy, describeAsk, isEditTool, planOf, questionsOf, ruleFor } from
 import { customAgents, drawPicture, keyList, pictureListen, slackPost, slackUpload } from "./runner";
 import { checkpointRestore, checkpointSave, detectEngines, endInput, ensureSpace, inTauri, listFiles, readText, startProcess, stopProcess, trashPath, windowsList, writeProcess } from "./runner";
 import { branchOf, closeTree, ensureRepo, prepareTree } from "./trees";
-import { ORCH, ROLE_DEFAULTS, ROUTER, isLeadRole } from "./types";
+import { ORCH, ROLE_DEFAULTS, ROUTER, isLeadRole, mayCallLead } from "./types";
 import { AGENTS, ENGINE_CAN, agentById, authorName, pickEngine, route, trustFor, type AgentDef, type AgentKind, type Ev, type Mode, type RunOpts, type Trust } from "./types";
 
 interface Run {
@@ -267,7 +267,8 @@ function leadIntro(conv: Conv, person: string): string {
     "- If one teammate can simply do it, hand it straight over in one short message and write nothing else. No plan.",
     "- If it takes several steps, write the plan first, then hand out its first step in the same message. Write the plan exactly like this, one step per line:\nPLAN\n1. @Name: what they do\n2. @Name + @Name: what they do at the same time\n3. @Name: check the result. Repeat steps 2-3 until it passes, at most 3 times",
     "- Names inside the plan start nobody. Only what you write after the plan does.",
-    "- When the teammates you named have finished you are called again and see what they wrote. Start that message with a line `STEP: <number>` naming the plan step you now hand out, then the hand-offs. To repeat a step, hand it out again and say what must change this time.",
+    "- When the teammates you named in a plan have finished you are called again and see what they wrote. Start that message with a line `STEP: <number>` naming the plan step you now hand out, then the hand-offs. To repeat a step, hand it out again and say what must change this time.",
+    "- A teammate you handed something to without a plan answers the person directly. You hear from it again only if it names you: then read what it wrote and decide what happens next.",
     `- When everything is done, or it cannot be done, write a short final answer for ${person} with no @names in it: what was made and where it is.`,
     `- If you need a decision from ${person} before going on, ask one clear question with no @names in it and stop.`,
     `- Write in the language ${person} writes in.`,
@@ -320,7 +321,7 @@ function intro(agent: AgentDef, conv: Conv, guest?: string, called = false): str
     "How to work here:",
     ...rules,
     "- Stay in your own role. When part of the work belongs to a teammate's job, hand it over: write @Name followed by exactly what you need. They will be woken up and will see the thread. Never mention yourself.",
-    ...(led ? ["- An Orchestrator hands out the work in this channel. When it gave you a task, do that task and reply with what you did and where it is. It reads your reply and decides what happens next, so do not pass the rest of the job on yourself."] : []),
+    ...(led ? ["- An Orchestrator hands out the work in this channel. When it gave you a task, do that task and reply with what you did and where it is. It reads your reply and decides what happens next, so do not pass the rest of the job on yourself. When something is left for it to decide, end your reply with @Orchestrator and what it has to decide."] : []),
   ].join("\n");
 }
 
@@ -838,8 +839,8 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
     st.react(trigger.id, "✅", agentId, true);
     // A picture the cube asked for is drawn while the conversation goes on.
     if (!isRouter && !isLead) for (const pic of (said.pictures ?? []).slice(0, 1)) void drawFor(conv, msgId, agentId, pic, Boolean(how.guest));
-    // Only the Router may call on the Orchestrator, and nobody hands work to the Router.
-    const named = conv.kind === "channel" ? mentions(text, agentId).filter((id) => conv.members.includes(id) && id !== ROUTER && (id !== ORCH || isRouter)) : [];
+    // Nobody hands work to the Router. The Orchestrator answers whoever names it, except a teammate working on its plan: that one it hears from anyway, when the plan's step is done.
+    const named = conv.kind === "channel" ? mentions(text, agentId).filter((id) => conv.members.includes(id) && id !== ROUTER && (id !== ORCH || mayCallLead(isRouter, Boolean(run.job && jobs.has(run.job))))) : [];
     // The Orchestrator's rounds are counted on their own; everyone else may pass work on a few times.
     const next = isRouter ? named.slice(0, 1) : isLead || hops < st.settings.maxHops ? named : [];
     // A Router that named nobody answered the question itself. One that said nothing, or named someone who is not here, still has to pass the request on.
