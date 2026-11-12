@@ -7,8 +7,8 @@ import { answerAsk, approvePlan, rescan, restoreTo } from "@/agents/orchestrator
 import { branchDiff, dropBranch, mergeBranch } from "@/agents/trees";
 import { inTauri } from "@/agents/runner";
 import type { Question } from "@/agents/permissions";
-import { ORCH, ROUTER, agentById, authorName, type Status } from "@/agents/types";
-import { PersonAvatar, RichText, timeOf } from "@/components/bits";
+import { AGENTS, ORCH, ROUTER, agentById, authorName, type Status } from "@/agents/types";
+import { Face, PersonAvatar, RichText, timeOf } from "@/components/bits";
 import { CheckIcon } from "@/components/icons";
 import { CopyIcon, PencilIcon, PinIcon, RewindIcon, ThreadIcon, TrashIcon } from "@/components/icons";
 import { kindOf } from "@/lib/files";
@@ -359,6 +359,9 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
     if (next && next !== msg.text) patchMsg(msg.id, { text: next, edited: true });
     setEditing(undefined);
   };
+  const lang = useCube((s) => s.settings.lang);
+  // In a channel other people are in, this person's own cubes say so.
+  const sharedHere = useCube((s) => Boolean(s.convs.find((c) => c.id === msg.convId)?.shared));
   const openThread = useCube((s) => s.openThread);
   const deleteMsg = useCube((s) => s.deleteMsg);
   // The same things the bar above a message offers, where the hand already is.
@@ -377,11 +380,13 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
   return (
       <RightClick items={menu}>
       <div data-mid={msg.id} className={cn("group relative flex items-start gap-1.5 rounded-xl px-4 py-0.5", fresh && "msg-in", mine && "mine flex-row-reverse", compact && !mine && "pl-12")}>
-        {msg.from && (
-          <span className="flex flex-none items-center justify-center rounded-xl bg-secondary font-semibold text-foreground" style={{ width: size, height: size, fontSize: size * 0.4 }} aria-hidden="true" data-notranslate>
-            {(msg.from.agent ?? msg.from.name).trim().charAt(0).toUpperCase() || "?"}
+        {msg.from && (msg.from.agent ? (
+          // A teammate's cube is drawn as the cube it is, with its owner on the corner, so it is never taken for one of this person's own.
+          <span className="relative flex-none" style={{ width: size, height: size }} title={msg.from.name} aria-hidden="true">
+            <CubeStill color={msg.from.color ?? AGENTS.find((a) => a.name === msg.from?.agent)?.color ?? "#8E8E93"} size={size} />
+            <Face pubkey={msg.from.pubkey} name={msg.from.name} size={Math.round(size * 0.46)} className="absolute -bottom-1 -right-1 ring-2 ring-background" />
           </span>
-        )}
+        ) : <Face pubkey={msg.from.pubkey} name={msg.from.name} size={size} />)}
         {mine ? (compact ? <PersonAvatar size={24} /> : null) : agent && (
           <button type="button" className="flex-none rounded-xl" aria-label={`Open ${agent.name}'s profile`} onClick={() => openProfile(agent.id)}>
             {msg.streaming ? <Cube color={agent.color} status={status} size={size} /> : <CubeStill color={agent.color} size={size} />}
@@ -390,9 +395,10 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
         <div className={cn("flex min-w-0 max-w-[84%] flex-col gap-1", mine && "items-end")}>
           <div className="flex items-baseline gap-1.5 px-1 text-xs text-muted-foreground">
             {!mine && (msg.from
-              ? <span className="font-semibold text-foreground" data-notranslate title={`Signed by ${msg.from.pubkey.slice(0, 12)}…`}>{msg.from.agent ? `${msg.from.agent} · ${msg.from.name}` : msg.from.name}</span>
+              ? <span className="font-semibold text-foreground" data-notranslate title={`Signed by ${msg.from.pubkey.slice(0, 12)}…`}>{msg.from.agent ? (lang === "ko" ? `${msg.from.name}의 ${msg.from.agent}` : `${msg.from.name}'s ${msg.from.agent}`) : msg.from.name}</span>
               : <span className="font-semibold text-foreground">{agent?.name ?? msg.author}</span>)}
             {msg.from && <span>{msg.from.agent ? "teammate's cube" : "teammate"}</span>}
+            {!msg.from && !mine && agent && sharedHere && <span>your cube</span>}
             {msg.auto && <span>picked this up</span>}
             {msg.stepped && <span className="font-semibold text-primary">You stepped in</span>}
             <time dateTime={new Date(msg.ts).toISOString()}>{timeOf(msg.ts)}</time>
@@ -429,6 +435,7 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
             <div
               className={cn(
                 "selectable [overflow-wrap:anywhere]",
+                !slim && "chat-text",
                 slim ? "px-1 text-[13px] text-muted-foreground" : "rounded-[18px] px-3.5 py-2",
                 mine ? "rounded-br-md bg-primary text-primary-foreground" : !slim && "rounded-bl-md bg-muted",
                 msg.aside && (mine ? "bg-primary/75" : "border border-dashed bg-transparent"),

@@ -31,17 +31,32 @@ export function EngineLabel({ agent }: { agent: AgentDef }) {
   );
 }
 
-export function PersonAvatar({ size = 28 }: { size?: number }) {
-  const initial = useCube((s) => s.name.trim().charAt(0).toUpperCase() || "Y");
+/**
+ * A person: their picture if they set one, otherwise the first letter of their name. With no
+ * `pubkey` it is the person using this Cube.
+ */
+export function Face({ pubkey, name, size = 28, className }: { pubkey?: string; name?: string; size?: number; className?: string }) {
+  const me = useCube((s) => s.team.info?.pubkey);
+  const own = !pubkey || pubkey === me;
+  const picture = useCube((s) => (own ? s.avatar : s.team.avatars?.[pubkey]));
+  const myName = useCube((s) => s.name);
+  const shown = (own ? (name ?? myName) : (name ?? "")).trim();
+  if (picture) return <img src={picture} alt="" width={size} height={size} className={cn("flex-none rounded-full object-cover", className)} style={{ width: size, height: size }} />;
   return (
     <span
-      className="flex flex-none items-center justify-center rounded-full bg-primary font-semibold text-primary-foreground"
+      className={cn("flex flex-none items-center justify-center rounded-full font-semibold", own ? "bg-primary text-primary-foreground" : "bg-secondary text-foreground", className)}
       style={{ width: size, height: size, fontSize: size * 0.42 }}
       aria-hidden="true"
+      data-notranslate
     >
-      {initial}
+      {shown.charAt(0).toUpperCase() || (own ? "Y" : "?")}
     </span>
   );
+}
+
+/** The person using this Cube. */
+export function PersonAvatar({ size = 28 }: { size?: number }) {
+  return <Face size={size} />;
 }
 
 export function timeOf(ts: number): string {
@@ -49,7 +64,7 @@ export function timeOf(ts: number): string {
 }
 
 /** Matches a mention of anyone on the team as it is now, sub-agents included. */
-const mention = () => new RegExp(`@(${[...AGENTS.map((a) => a.name), "You"].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\p{L}\\p{N}])`, "giu");
+const mention = () => new RegExp(`@(${[...AGENTS.map((a) => a.name), "You", ...useCube.getState().team.members.map((m) => m.name.replace(/\s+/g, "")).filter(Boolean)].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\p{L}\\p{N}])`, "giu");
 
 function Anchor({ href, children }: ComponentProps<"a">) {
   if (href === "#mention") return <span className="at">{children}</span>;

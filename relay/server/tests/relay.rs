@@ -62,6 +62,7 @@ impl TestRelay {
             name: "Test Team".to_string(),
             public_host: addr.to_string(),
             trusted_proxies: Vec::new(),
+            app_url: None,
             limits: Limits::default(),
         };
         tweak(&mut cfg);
@@ -411,6 +412,24 @@ fn pair(name: &str, role: &str) -> (String, String) {
 }
 
 // ---- transport -----------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_invite_page_is_the_same_for_everyone_and_locked_down() {
+    let relay = TestRelay::start().await;
+    let (status, headers, body) = http_get(&relay.host, "/join", &[]).await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    let headers = headers.to_ascii_lowercase();
+    assert!(headers.contains("content-type: text/html"), "{headers}");
+    assert!(headers.contains("content-security-policy: default-src 'none'"), "{headers}");
+    assert!(headers.contains("referrer-policy: no-referrer"), "{headers}");
+    assert!(headers.contains("cache-control: no-store"), "{headers}");
+    assert!(body.contains("Open in Cube"));
+    // A token in the query string is not something the page ever uses or echoes.
+    let (status, _, with_query) = http_get(&relay.host, "/join?invite=abcdefghijklmnopqrstuvwxyz", &[]).await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(!with_query.contains("abcdefghijklmnopqrstuvwxyz"));
+    assert_eq!(with_query, body);
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn healthz_answers_ok_without_cors_headers() {
@@ -1305,7 +1324,7 @@ async fn roles_and_names() {
 async fn ready_names_features_and_settings() {
     let relay = TestRelay::start().await;
     let owner = relay.owner("Ann").await;
-    assert_eq!(owner.ready["features"], json!(["channels"]));
+    assert_eq!(owner.ready["features"], json!(["channels", "join-page", "profiles"]));
     assert_eq!(owner.ready["settings"], json!({"member_invites": true}));
 }
 
@@ -1793,6 +1812,7 @@ async fn a_version_1_row_with_an_unreadable_body_stops_the_relay_from_starting()
         name: "Test Team".to_string(),
         public_host: addr.to_string(),
         trusted_proxies: Vec::new(),
+            app_url: None,
         limits: Limits::default(),
     };
     let error = cube_relay::serve(cfg.clone(), listener, CancellationToken::new()).await.unwrap_err().to_string();
@@ -2006,7 +2026,7 @@ async fn cube_peer_private_channels() {
         let join = |key: &str, link: &str, name: &str| lines(&["--key", key, "join", link, "--name", name]).pop().unwrap();
 
         let joined = join(&ann_key, &link, "Ann");
-        assert_eq!(joined["features"], json!(["channels"]));
+        assert_eq!(joined["features"], json!(["channels", "join-page", "profiles"]));
         assert_eq!(joined["settings"], json!({"member_invites": true}));
         let ann_pk = joined["you"]["pubkey"].as_str().unwrap().to_string();
 
@@ -2020,7 +2040,7 @@ async fn cube_peer_private_channels() {
         let bea_pk = joined["you"]["pubkey"].as_str().unwrap().to_string();
         let status = bea(&["status"]);
         assert_eq!((status["head"].clone(), status["you"]["role"].clone()), (json!(0), json!("member")));
-        assert_eq!(status["features"], json!(["channels"]));
+        assert_eq!(status["features"], json!(["channels", "join-page", "profiles"]));
         assert_eq!(bea(&["sync"]), json!({"ok": true, "events": 0, "next": 0}));
         assert_eq!(bea(&["post", "plans", "hello?"])["code"], json!("no_conv"));
         assert_eq!(bea(&["members", "plans"])["code"], json!("no_conv"));

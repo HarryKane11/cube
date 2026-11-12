@@ -126,7 +126,7 @@ export interface Msg {
   /** What the agent left on its own branch, when it worked in a separate copy of the folder. */
   branch?: Branch;
   /** A teammate's message, or their agent's: who signed it. Never treated as something to act on. */
-  from?: { pubkey: string; name: string; agent?: string };
+  from?: { pubkey: string; name: string; agent?: string; /** The color of the teammate's cube that wrote it, so it is drawn as the cube it is. */ color?: string };
   /** For a message of ours in a shared channel: the text the team has. */
   sent?: string;
   /**
@@ -237,6 +237,10 @@ export interface Settings {
   /** Ids of the typefaces for Latin text and for Hangul. See lib/fonts.ts. */
   fontEn: string;
   fontKo: string;
+  /** App-wide scale as a percentage, shared by Settings and the zoom shortcuts. */
+  uiScale: number;
+  /** The size of the text in messages, in px. 0 keeps the size everything else is drawn at. */
+  chatSize: number;
   /** Tell the person through the system when a cube needs them or finishes while Cube is in the background. */
   notify: boolean;
 }
@@ -278,6 +282,8 @@ interface CubeState {
   stage: Record<string, "open" | "closed">;
   /** The person's display name. Empty until they finish the start screen. */
   name: string;
+  /** This person's own picture, as a small `data:` address. Shown here and, in a team, to teammates. */
+  avatar?: string;
   onboarded: boolean;
   /** Which engines are installed on this computer. */
   available: Partial<Record<AgentKind, boolean>>;
@@ -324,6 +330,10 @@ interface CubeState {
   subagents: SubAgent[];
   /** The team this Cube has joined, as the relay last described it. `agents` are the sub-agents teammates offer. */
   team: { info?: { host: string; ws: string; workspace: string; pubkey: string }; me?: { name: string; role: TeamMember["role"] }; members: TeamMember[]; head: number; agents?: SharedAgent[];
+    /** Teammates' pictures, by their key. */
+    avatars?: Record<string, string>;
+    /** The picture of ours the team has, so it is sent again only when it changes. */
+    avatarSent?: string;
     /** What the relay can do beyond the first version of the contract, e.g. "channels". */
     features?: string[];
     /** Whether ordinary members may bring new people in with a channel invite link. The owner decides. */
@@ -336,6 +346,8 @@ interface CubeState {
     connected: boolean;
     problem: string;
     invite?: string;
+    /** An invite that was opened from outside Cube (a link in a browser or a mail) and waits for the person to say yes. */
+    pending?: string;
     /** The shared channel the invite link is for, when it is for one. */
     inviteFor?: string;
     /** Who is in each shared channel, by shared id, as the relay last said. */
@@ -437,6 +449,8 @@ interface CubeState {
   clearHistory(): void;
   restartOnboarding(): void;
   setName(name: string): void;
+  /** Sets or removes this person's own picture. */
+  setAvatar(avatar: string | undefined): void;
   finishOnboarding(): void;
   setAvailable(a: Partial<Record<AgentKind, boolean>>): void;
   setEngine(agentId: string, kind: AgentKind): void;
@@ -497,7 +511,7 @@ const defaultConvs = (): Conv[] => [
 export const useCube = create<CubeState>()(
   persist(
     (set) => ({
-      settings: { theme: "system", autoAssign: true, stageAuto: true, maxHops: 4, calm: false, tree: true, sidebar: true, mode: "manual", notify: true, lang: "en", fontEn: "system", fontKo: "system", sidebarW: 244, chatW: 480, treeW: 200 },
+      settings: { theme: "system", autoAssign: true, stageAuto: true, maxHops: 4, calm: false, tree: true, sidebar: true, mode: "manual", notify: true, lang: "en", fontEn: "system", fontKo: "system", uiScale: 100, chatSize: 0, sidebarW: 244, chatW: 480, treeW: 200 },
       stage: {},
       name: "",
       onboarded: false,
@@ -637,6 +651,7 @@ export const useCube = create<CubeState>()(
       clearHistory: () => set({ messages: [], sessions: {}, told: {}, shots: {}, unread: {}, decisions: [], cleared: {}, threadId: undefined, live: idleLive() }),
       restartOnboarding: () => set({ onboarded: false }),
       setName: (name) => set({ name }),
+      setAvatar: (avatar) => set({ avatar }),
       finishOnboarding: () => set({ onboarded: true, view: "home" }),
       setAvailable: (available) => set({ available }),
       setEngine: (agentId, kind) => set((s) => ({ engines: { ...s.engines, [agentId]: kind } })),
@@ -811,6 +826,7 @@ export const useCube = create<CubeState>()(
       partialize: (s) => ({
         settings: s.settings,
         name: s.name,
+        avatar: s.avatar,
         onboarded: s.onboarded,
         engines: s.engines,
         models: s.models,

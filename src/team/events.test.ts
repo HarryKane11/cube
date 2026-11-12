@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Msg } from "@/state/store";
-import { applyEvent, dmId, dmPeer, inviteLink, nameOf, postBody, shareable, withoutImages, type TeamEvent, type TeamMember } from "./events";
+import { applyEvent, dmId, dmPeer, inviteLink, nameOf, normalizeInvite, postBody, shareable, tagOf, taggedIn, withoutImages, type TeamEvent, type TeamMember } from "./events";
 
 const ME = "aa".repeat(32);
 const BEA = "bb".repeat(32);
@@ -132,5 +132,48 @@ describe("a direct conversation between two people", () => {
     expect(dmPeer(`${dmId(ME, BEA)}.x`, ME, members)).toBeUndefined();
     expect(dmPeer("dm.aa.bb", ME, members)).toBeUndefined();
     expect(dmPeer("S1", ME, members)).toBeUndefined();
+  });
+});
+
+describe("an invite, however it arrives", () => {
+  const t = "T9qW1GiQO2CQ1tuoxYttwNXRz8abcdefghij";
+  it("is written as a web address when the relay serves the invite page", () => {
+    expect(inviteLink("relay.example.com", t, true)).toBe(`https://relay.example.com/join#invite=${t}`);
+    expect(inviteLink("127.0.0.1:8484", t, true)).toBe(`http://127.0.0.1:8484/join#invite=${t}`);
+    expect(inviteLink("relay.example.com", t)).toBe(`cube+wss://relay.example.com/#invite=${t}`);
+  });
+  it("becomes the one form Cube joins with", () => {
+    const want = `cube+wss://relay.example.com/#invite=${t}`;
+    expect(normalizeInvite(want)).toBe(want);
+    expect(normalizeInvite(`  https://relay.example.com/join#invite=${t} `)).toBe(want);
+    expect(normalizeInvite(`cube://relay.example.com/#invite=${t}`)).toBe(want);
+    expect(normalizeInvite(`cube://Relay.Example.com/#invite=${t}`)).toBe(want);
+    expect(normalizeInvite(`http://127.0.0.1:8484/join#invite=${t}`)).toBe(`cube+ws://127.0.0.1:8484/#invite=${t}`);
+    expect(normalizeInvite(`cube://127.0.0.1:8484/#invite=${t}`)).toBe(`cube+ws://127.0.0.1:8484/#invite=${t}`);
+  });
+  it("is nothing when it is not an invite, or would go unencrypted to another computer", () => {
+    expect(normalizeInvite(`http://relay.example.com/join#invite=${t}`)).toBeUndefined();
+    expect(normalizeInvite(`cube+ws://relay.example.com/#invite=${t}`)).toBeUndefined();
+    expect(normalizeInvite(`https://relay.example.com/#invite=${t}`)).toBeUndefined();
+    expect(normalizeInvite(`https://relay.example.com/join?x=1#invite=${t}`)).toBeUndefined();
+    expect(normalizeInvite(`https://user@relay.example.com/join#invite=${t}`)).toBeUndefined();
+    expect(normalizeInvite("https://relay.example.com/join#invite=short")).toBeUndefined();
+    expect(normalizeInvite("cube://relay.example.com/")).toBeUndefined();
+    expect(normalizeInvite("javascript:alert(1)")).toBeUndefined();
+  });
+});
+
+describe("tagging a person", () => {
+  const team: TeamMember[] = [...members, { pubkey: "dd".repeat(32), name: "윤 성재", role: "member" }];
+  it("finds who a text tags, whatever the case", () => {
+    expect(taggedIn("@Bea 이거 봐 줄래요?", team)).toEqual([BEA]);
+    expect(taggedIn("hey @bea and @CY, look", team)).toEqual([BEA, CY]);
+    expect(taggedIn("@윤성재 확인 부탁드려요", team)).toEqual(["dd".repeat(32)]);
+    expect(tagOf("윤 성재")).toBe("윤성재");
+  });
+  it("is not fooled by longer words, addresses, or no tag at all", () => {
+    expect(taggedIn("@Beatrice is someone else", team)).toEqual([]);
+    expect(taggedIn("mail bea@bea.example", team)).toEqual([]);
+    expect(taggedIn("Bea said hi", team)).toEqual([]);
   });
 });

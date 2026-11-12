@@ -130,13 +130,13 @@ CREATE TABLE conv_members (
 /// member is in it. Anything else is readable by nobody: a channel with no
 /// `convs` row, and a row of a channel kind that names no channel (which only
 /// a relay older than this schema could have written).
-const ROW_READABLE: &str = "((e.conv IS NULL AND e.kind IN ('agent.put', 'agent.drop'))
+const ROW_READABLE: &str = "((e.conv IS NULL AND e.kind IN ('agent.put', 'agent.drop', 'profile.put'))
     OR EXISTS (SELECT 1 FROM convs c WHERE c.ws = e.ws AND c.conv = e.conv AND c.private = 0)
     OR EXISTS (SELECT 1 FROM conv_members m WHERE m.ws = e.ws AND m.conv = e.conv AND m.pubkey = ?2))";
 
 /// What a member is served: what they may read, and the event that removed
 /// them from a channel, so their app learns that it happened.
-const ROW_VISIBLE: &str = "((e.conv IS NULL AND e.kind IN ('agent.put', 'agent.drop'))
+const ROW_VISIBLE: &str = "((e.conv IS NULL AND e.kind IN ('agent.put', 'agent.drop', 'profile.put'))
     OR EXISTS (SELECT 1 FROM convs c WHERE c.ws = e.ws AND c.conv = e.conv AND c.private = 0)
     OR EXISTS (SELECT 1 FROM conv_members m WHERE m.ws = e.ws AND m.conv = e.conv AND m.pubkey = ?2)
     OR (e.kind = 'conv.remove' AND e.target = ?2))";
@@ -383,8 +383,23 @@ fn str_field<'a>(obj: &'a serde_json::Map<String, serde_json::Value>, key: &str)
 
 /// The kinds that are about a person's own cube and belong to no channel.
 /// `ROW_READABLE` and `ROW_VISIBLE` name the same two.
+/// The longest picture a member may set, as the text of a `data:` address. About 18 kB of image.
+const MAX_AVATAR: usize = 24_000;
+
+/// A picture as `profile.put` carries it: nothing, or a `data:` address of a bitmap (never SVG,
+/// which can carry script), base64 all the way and no longer than `MAX_AVATAR`.
+fn valid_avatar(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    let Some(rest) = ["data:image/jpeg;base64,", "data:image/png;base64,", "data:image/webp;base64,"].iter().find_map(|p| text.strip_prefix(p)) else {
+        return false;
+    };
+    text.len() <= MAX_AVATAR && !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+}
+
 fn without_channel(kind: &str) -> bool {
-    matches!(kind, "agent.put" | "agent.drop")
+    matches!(kind, "agent.put" | "agent.drop" | "profile.put")
 }
 
 /// An optional true/false field; `Err` when it is present and something else.
@@ -1097,6 +1112,13 @@ impl Db {
                     return refuse("bad_body", "body.id must be a short string");
                 }
             }
+            // A member's own picture, small enough to travel in an event. Empty takes it away.
+            "profile.put" => {
+                let picture = str_field(obj, "avatar");
+                if !picture.is_some_and(valid_avatar) {
+                    return refuse("bad_body", "body.avatar must be a small JPEG, PNG or WebP as a data: address, or empty");
+                }
+            }
             _ => return refuse("unknown_kind", "unknown event kind"),
         }
 
@@ -1124,6 +1146,15 @@ impl Db {
                 target
             ],
         )?;
+        if event.kind == "profile.put" {
+            // Only the latest picture of a member means anything: earlier ones are emptied, so
+            // they are neither kept nor sent to anyone again.
+            tx.execute(
+                "UPDATE events SET body = '{}', sig = NULL, redacted = 1
+                 WHERE ws = ?1 AND kind = 'profile.put' AND pubkey = ?2 AND seq < ?3",
+                params![ws, event.pubkey, seq],
+            )?;
+        }
         if let (true, Some(id)) = (redact_earlier, msg_id) {
             // Keep id, key and seq; replace what was said, and drop the
             // signature that no longer matches.
@@ -1724,6 +1755,31 @@ mod tests {
         assert_eq!(code(publish(&mut f.db, &ann, "agent.put", serde_json::json!({"agent": {"id": "x"}}))), "bad_body");
         assert_eq!(code(publish(&mut f.db, &ann, "agent.put", serde_json::json!({"agent": {"id": "a\nb", "name": "Legal"}}))), "bad_body");
         assert_eq!(code(publish(&mut f.db, &ann, "agent.drop", serde_json::json!({}))), "bad_body");
+
+        // A member's picture: a small bitmap, or nothing. Only the latest is kept.
+        let jpeg = |n: usize| format!("data:image/jpeg;base64,{}", "A".repeat(n));
+        let first = publish(&mut f.db, &ann, "profile.put", serde_json::json!({"avatar": jpeg(400)})).unwrap();
+        let second = publish(&mut f.db, &ann, "profile.put", serde_json::json!({"avatar": jpeg(800)})).unwrap();
+        assert!(publish(&mut f.db, &ann, "profile.put", serde_json::json!({"avatar": ""})).is_ok());
+        let kept: Vec<(i64, bool)> = {
+            let mut stmt = f.db.conn.prepare("SELECT seq, redacted FROM events WHERE kind = 'profile.put' ORDER BY seq").unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept.iter().map(|k| k.1).collect::<Vec<_>>(), vec![true, true, false]);
+        assert!(first.seq < second.seq);
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"avatar": "https://example.com/me.png"}),
+            serde_json::json!({"avatar": "data:image/svg+xml;base64,PHN2Zz4="}),
+            serde_json::json!({"avatar": "data:image/png;base64,"}),
+            serde_json::json!({"avatar": "data:image/png;base64,ab cd"}),
+            serde_json::json!({"avatar": jpeg(30_000)}),
+        ] {
+            assert_eq!(code(publish(&mut f.db, &ann, "profile.put", bad.clone())), "bad_body", "{bad}");
+        }
+        assert_eq!(code(publish(&mut f.db, &outsider, "profile.put", serde_json::json!({"avatar": ""}))), "not_member");
         // Every other kind still needs its channel.
         assert_eq!(code(publish(&mut f.db, &ann, "msg.post", serde_json::json!({"msg": {"id": "m", "text": "x"}}))), "bad_body");
     }

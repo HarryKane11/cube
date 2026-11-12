@@ -6,7 +6,7 @@
 # `trusted_proxies` here unless another proxy really sits in front of Caddy.
 # Access logging is off by default; leave it off.
 {$RELAY_DOMAIN} {
-	@relay path /ws /healthz
+	@relay path /ws /healthz /join
 	handle @relay {
 		reverse_proxy relay:8484
 	}

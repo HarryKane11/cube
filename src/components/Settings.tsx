@@ -4,8 +4,13 @@ import { modeChanged, refreshEngines } from "@/agents/orchestrator";
 import { inTauri, keyDelete, keyList, keySet } from "@/agents/runner";
 import { MODES } from "@/agents/types";
 import { FONTS_EN, FONTS_KO, fontName } from "@/lib/fonts";
+import { UI_SCALES } from "@/lib/uiScale";
 import { BellIcon, BookIcon, CubeIcon, DataIcon, GearIcon, PeopleIcon, PlugIcon, UserIcon } from "@/components/icons";
+import { Face } from "@/components/bits";
+import { toAvatar } from "@/lib/avatar";
+import { setMyAvatar } from "@/team";
 import { People } from "@/components/People";
+import { ShortcutList } from "@/components/Sidebar";
 import { Knowledge } from "@/components/Knowledge";
 import { RemoteAgents } from "@/components/RemoteAgents";
 import { SlackSettings } from "@/components/SlackSettings";
@@ -113,6 +118,8 @@ export function SettingsView() {
   const set = useCube((s) => s.setSetting);
   const name = useCube((s) => s.name);
   const setName = useCube((s) => s.setName);
+  const hasPicture = useCube((s) => Boolean(s.avatar));
+  const [pictureError, setPictureError] = useState("");
   const clearHistory = useCube((s) => s.clearHistory);
   const restartOnboarding = useCube((s) => s.restartOnboarding);
   const [confirming, setConfirming] = useState(false);
@@ -136,6 +143,25 @@ export function SettingsView() {
         {tab === "general" && (
           <>
         <Section title="You">
+          <div className="mb-4 flex items-center gap-4">
+            <Face size={64} />
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+              <div className="flex flex-wrap gap-2">
+                <label className={cn(pill, "flex cursor-pointer items-center")}>
+                  Choose a picture
+                  <input type="file" accept="image/png,image/jpeg,image/webp,image/heic" className="sr-only" onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = "";
+                    setPictureError("");
+                    if (file) void toAvatar(file).then(setMyAvatar).catch((err) => setPictureError(String(err)));
+                  }} />
+                </label>
+                {hasPicture && <button type="button" className={pill} onClick={() => setMyAvatar(undefined)}>Remove</button>}
+              </div>
+              <p className="text-[13px] text-muted-foreground">Shown next to your messages. In a team, teammates see it too.</p>
+              {pictureError && <p className="text-[13px] text-destructive" role="alert" data-notranslate>{pictureError}</p>}
+            </div>
+          </div>
           <label htmlFor="set-name" className="mb-1.5 block font-medium">Name</label>
           <Input id="set-name" value={name} onChange={(e) => setName(e.target.value)} className="selectable h-9 max-w-[320px]" />
           <p className="mt-1.5 text-[13px] text-muted-foreground">Agents use this name when they talk to you.</p>
@@ -163,7 +189,30 @@ export function SettingsView() {
               </select>
             </div>
           ))}
+          <div className="flex flex-wrap items-center gap-4 border-b py-3">
+            <div className="min-w-[160px] flex-1">
+              <label htmlFor="set-ui-scale" className="font-medium">Screen size</label>
+              <div className="text-[13px] text-muted-foreground">Scale text and controls together. ⌘+ / ⌘− / ⌘0 (Ctrl on Windows/Linux).</div>
+            </div>
+            <select id="set-ui-scale" value={settings.uiScale} onChange={(e) => set("uiScale", Number(e.target.value))} className="selectable h-9 rounded-xl border bg-transparent px-2.5 text-[13px]" data-notranslate>
+              {UI_SCALES.map((scale) => <option key={scale} value={scale}>{scale}%</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-4 border-t py-3">
+            <div className="min-w-0 flex-1">
+              <label htmlFor="set-chat-size" className="font-medium">Message text size</label>
+              <div className="text-[13px] text-muted-foreground">Only what is said in conversations. Everything else keeps its size.</div>
+            </div>
+            <select id="set-chat-size" value={settings.chatSize || 0} onChange={(e) => set("chatSize", Number(e.target.value))} className="selectable h-9 rounded-xl border bg-transparent px-2.5 text-[13px]">
+              <option value={0}>Default</option>
+              {[13, 14, 16, 17, 18, 20].map((px) => <option key={px} value={px} data-notranslate>{px}px</option>)}
+            </select>
+          </div>
           <p className="pt-3 text-[17px] leading-relaxed" data-notranslate>The quick brown fox jumps over the lazy dog. 0123456789<br />다람쥐 헌 쳇바퀴에 타고파. 큐브와 함께 일하는 작업 공간.</p>
+        </Section>
+
+        <Section title="Keyboard shortcuts">
+          <ShortcutList />
         </Section>
 
         <Section title="Look">

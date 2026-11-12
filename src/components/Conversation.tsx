@@ -1,8 +1,9 @@
 import { useMemo, useState, useEffect } from "react";
 import { setSeparate, stopAgent, undoRestore } from "@/agents/orchestrator";
 import { agentById, type AgentDef } from "@/agents/types";
-import { EngineLabel } from "@/components/bits";
+import { EngineLabel, Face } from "@/components/bits";
 import { ChannelPeople } from "@/components/ChannelPeople";
+import { refreshMembers } from "@/team";
 import { Composer } from "@/components/Composer";
 import { BranchIcon, CloseIcon, HashIcon, LockIcon, PinIcon, StageIcon, PeopleIcon } from "@/components/icons";
 import { authorName } from "@/agents/types";
@@ -24,10 +25,23 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
   const [problem, setProblem] = useState("");
   const [people, setPeople] = useState(false);
   const inTeam = useCube((s) => Boolean(s.team.info));
+  const teamMembers = useCube((s) => s.team.members);
+  const inChannel = useCube((s) => (conv.shared ? s.teamLive.convMembers?.[conv.shared.id] : undefined));
+  // Who else is here: everyone in the team for a channel shared with all of it, the invited ones for a private one.
+  const here = !conv.shared || conv.person ? [] : conv.shared.private ? teamMembers.filter((m) => inChannel?.includes(m.pubkey)) : teamMembers;
+  useEffect(() => {
+    if (conv.shared?.private) refreshMembers(conv.shared.id);
+  }, [conv.shared?.id, conv.shared?.private]);
+  // ⇧⌘I asks for this from anywhere in the window.
+  useEffect(() => {
+    const open = () => { if (!dm && inTeam && !conv.person) setPeople(true); };
+    window.addEventListener("cube:invite", open);
+    return () => window.removeEventListener("cube:invite", open);
+  }, [dm, inTeam, conv.person]);
   return (
     <header className="flex min-h-[62px] items-center gap-2.5 border-b px-5 py-2.5" data-tauri-drag-region>
       {dm ? <Cube color={dm.color} status={live[dm.id]?.status ?? "idle"} size={40} /> : conv.person ? (
-        <span className="flex size-9 flex-none items-center justify-center rounded-full bg-secondary text-[15px] font-semibold" aria-hidden="true" data-notranslate>{conv.name.trim().charAt(0).toUpperCase() || "?"}</span>
+        <Face pubkey={conv.person.pubkey} name={conv.name} size={36} />
       ) : <HashIcon className="text-muted-foreground" width={22} height={22} />}
       <div className="min-w-0 flex-1">
         <h1 className="flex items-center gap-2 truncate font-heading text-[19px] font-bold leading-tight tracking-[-0.02em]">
@@ -48,6 +62,16 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
           </p>
         )}
       </div>
+      {here.length > 0 && (
+        <button type="button" className="flex h-8 flex-none items-center gap-1.5 rounded-full bg-secondary pl-1.5 pr-2.5 text-[13px] font-semibold" title={`${here.map((m) => m.name).join(", ")}`} aria-label={`People in this channel: ${here.map((m) => m.name).join(", ")}`} onClick={() => setPeople(true)}>
+          <span className="flex -space-x-1.5" aria-hidden="true">
+            {here.slice(0, 3).map((m) => (
+              <Face key={m.pubkey} pubkey={m.pubkey} name={m.name} size={22} className="ring-2 ring-secondary" />
+            ))}
+          </span>
+          <span className="tabular-nums" data-notranslate>{here.length}</span>
+        </button>
+      )}
       {!dm && inTeam && !conv.person && (
         <button type="button" className="flex h-8 flex-none items-center gap-1.5 rounded-full bg-secondary px-3 text-[13px] font-semibold" title="Share this channel and invite people into it" onClick={() => setPeople(true)}>
           <PeopleIcon width={15} height={15} /> Invite

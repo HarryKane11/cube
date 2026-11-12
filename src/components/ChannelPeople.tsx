@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { LockIcon, PeopleIcon } from "@/components/icons";
-import { InviteQr } from "@/components/People";
+import { InviteLinkBox } from "@/components/People";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { useCube, type Conv } from "@/state/store";
@@ -20,7 +20,6 @@ export function ChannelPeople({ conv, open, onOpenChange }: { conv: Conv; open: 
   const openSettings = useCube((s) => s.openSettings);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
   const shared = conv.shared;
   const inChannel = (shared && live.convMembers?.[shared.id]) || NO_ONE;
   const me = team.info?.pubkey ?? "";
@@ -31,7 +30,7 @@ export function ChannelPeople({ conv, open, onOpenChange }: { conv: Conv; open: 
 
   useEffect(() => {
     if (open && shared) refreshMembers(shared.id);
-    if (open) { setError(""); setCopied(false); }
+    if (open) setError("");
   }, [open, shared?.id]);
 
   const run = (job: () => Promise<unknown>) => {
@@ -89,6 +88,17 @@ export function ChannelPeople({ conv, open, onOpenChange }: { conv: Conv; open: 
               </section>
             )}
 
+            {!shared.private && (
+              <section>
+                <h3 className="mb-1 text-[13px] font-semibold text-muted-foreground">In this channel: the whole team</h3>
+                <ul className="flex flex-wrap gap-1.5">
+                  {team.members.map((m) => (
+                    <li key={m.pubkey} className="rounded-full bg-secondary px-2.5 py-0.5 text-[13px]" data-notranslate>{nameOf(m.pubkey, team.members)}{m.pubkey === me ? " (you)" : ""}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
             {shared.private && team.members.some((m) => !inChannel.includes(m.pubkey)) && (
               <section>
                 <h3 className="mb-1 text-[13px] font-semibold text-muted-foreground">Add teammates</h3>
@@ -108,16 +118,7 @@ export function ChannelPeople({ conv, open, onOpenChange }: { conv: Conv; open: 
               {canLink ? (
                 <>
                   <p className="mb-2 text-[13px] text-muted-foreground">A link works once and for seven days. Whoever opens it first joins the team and lands in this channel, and also sees the channels shared with the whole team. Send it to one person, over a channel you trust.</p>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button type="button" className={primary} disabled={!live.connected} onClick={() => { setCopied(false); setError(""); void askInvite(conv.id).catch((e) => setError(String(e))); }}>Make an invite link</button>
-                    {link && (
-                      <>
-                        <code className="selectable min-w-0 flex-1 truncate rounded-lg bg-secondary px-2.5 py-1.5 text-xs" data-notranslate>{link}</code>
-                        <button type="button" className={pill} onClick={() => void navigator.clipboard.writeText(link).then(() => setCopied(true))}>{copied ? "Copied" : "Copy link"}</button>
-                      </>
-                    )}
-                  </div>
-                  {link && <div className="mt-3"><InviteQr link={link} /></div>}
+                  <InviteLinkBox link={link} disabled={!live.connected} subject={`#${conv.name}`} onMake={(uses) => { setError(""); void askInvite(conv.id, uses).catch((e) => setError(String(e))); }} />
                 </>
               ) : (
                 <p className="text-[13px] text-muted-foreground">{channels ? "In this team only the owner and admins bring new people in. Ask one of them for a link." : "The team's relay is an earlier version: only the owner and admins can make invite links, in Settings > People."}</p>

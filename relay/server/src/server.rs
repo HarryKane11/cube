@@ -43,7 +43,7 @@ use crate::limiter::SlidingWindow;
 const RELAY_VERSION: &str = "cube-relay/1";
 /// What this relay does beyond the first version, named in `ready`.
 /// `channels`: private channels, channel member lists, `sync` by channel.
-const FEATURES: [&str; 1] = ["channels"];
+const FEATURES: [&str; 3] = ["channels", "join-page", "profiles"];
 /// How long a single write to a client may take before the handshake gives up.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -773,6 +773,16 @@ async fn handle_socket(relay: Arc<Relay>, socket: WebSocket, addr: IpAddr) {
     debug!(conn = id, member = short(&pubkey), "disconnected");
 }
 
+/// The page an invite link opens in a browser. It is the same for every visitor: the invite
+/// itself is in the part of the address a browser does not send.
+async fn join_page(State(relay): State<Arc<Relay>>) -> Response {
+    let mut response = axum::response::IntoResponse::into_response(crate::join::page(&relay.cfg.name, relay.cfg.app_url.as_deref()));
+    for (name, value) in crate::join::HEADERS {
+        response.headers_mut().insert(name, axum::http::HeaderValue::from_static(value));
+    }
+    response
+}
+
 async fn ws_handler(
     State(relay): State<Arc<Relay>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -804,6 +814,7 @@ pub async fn serve(cfg: Config, listener: TcpListener, shutdown: CancellationTok
     );
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/join", get(join_page))
         .route("/ws", get(ws_handler))
         .with_state(relay);
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())

@@ -1,6 +1,8 @@
 import qrcode from "qrcode-generator";
 import { useMemo, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { inTauri } from "@/agents/runner";
+import { Face } from "@/components/bits";
 import { Section, Switch } from "@/components/Settings";
 import { Input } from "@/components/ui/input";
 import type { SharedAgent } from "@/agents/subagents";
@@ -23,6 +25,58 @@ export function InviteQr({ link }: { link: string }) {
   }, [link]);
   // The markup is made here from the link's bits, not taken from anywhere.
   return <div className="size-[168px] flex-none overflow-hidden rounded-xl bg-white" role="img" aria-label="Invite link as a QR code" dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
+/** How many people one link lets in. One is the default: a link that gets passed on lets nobody else in. */
+const USES = [1, 5, 20];
+
+/**
+ * Making an invite link and handing it over: copy it, send it by mail, or show its QR code.
+ * `link` is the one made last, if it is for this place.
+ */
+export function InviteLinkBox({ link, disabled, onMake, subject }: { link?: string; disabled?: boolean; onMake: (uses: number) => void; subject: string }) {
+  const [uses, setUses] = useState(1);
+  const [copied, setCopied] = useState(false);
+  const lang = useCube((s) => s.settings.lang);
+  const mail = () => {
+    if (!link) return;
+    const body = lang === "ko"
+      ? `${subject}에 초대합니다.\n\n아래 링크를 누르면 Cube에서 열립니다. Cube가 없다면 먼저 설치한 뒤 다시 눌러 주세요.\n\n${link}\n\n이 링크는 입장권이니 다른 사람에게 넘기지 말아 주세요.`
+      : `You are invited to ${subject}.\n\nOpen the link below and it opens in Cube. If you do not have Cube yet, install it first and open the link again.\n\n${link}\n\nThe link is a ticket in: please do not pass it on.`;
+    const url = `mailto:?subject=${encodeURIComponent(lang === "ko" ? `Cube 초대: ${subject}` : `Cube invite: ${subject}`)}&body=${encodeURIComponent(body)}`;
+    // The person's own mail app opens with the message written; they choose who gets it and send it.
+    if (inTauri) void openUrl(url).catch(() => undefined);
+    else window.location.href = url;
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className={primary} disabled={disabled} onClick={() => { setCopied(false); onMake(uses); }}>Make an invite link</button>
+        <div className="flex flex-none items-center rounded-full bg-secondary p-0.5" role="group" aria-label="How many people the link lets in">
+          {USES.map((n) => (
+            <button type="button" key={n} aria-pressed={uses === n} title={n === 1 ? "For one person" : `For up to ${n} people`} className={cn("h-7 rounded-full px-2.5 text-xs font-semibold tabular-nums text-muted-foreground", uses === n && "bg-background text-foreground shadow-sm")} onClick={() => setUses(n)}>
+              <span data-notranslate>{n}</span>
+            </button>
+          ))}
+        </div>
+        <span className="text-[13px] text-muted-foreground">{uses === 1 ? "person" : "people"}</span>
+      </div>
+      {uses > 1 && <p className="text-[13px] text-muted-foreground">Whoever has this link can join until it has let that many people in. Post it only where everyone who sees it should be let in.</p>}
+      {link && (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="selectable min-w-0 flex-1 truncate rounded-lg bg-secondary px-2.5 py-1.5 text-xs" data-notranslate>{link}</code>
+            <button type="button" className={pill} onClick={() => void navigator.clipboard.writeText(link).then(() => setCopied(true))}>{copied ? "Copied" : "Copy link"}</button>
+            <button type="button" className={pill} onClick={mail}>Send by mail</button>
+          </div>
+          <div className="flex flex-wrap items-center gap-4">
+            <InviteQr link={link} />
+            <p className="min-w-[180px] flex-1 text-[13px] text-muted-foreground">{link.startsWith("http") ? "Opening the link shows a page with one button that opens it in Cube. The same link as a QR code is on the left." : "Your teammate pastes the link into Settings > People > Join a team in their Cube. The same link as a QR code is on the left."}</p>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 /** Sub-agents teammates offer. Bringing one in makes a copy that runs here, on this person's own agent programs. */
@@ -80,7 +134,7 @@ function Join() {
         A team shares channels through a small server it runs itself, the relay. Paste the invite link a teammate gave you. Your cubes keep running on this Mac only: teammates see what is said in shared channels, and nothing they write can start a cube here.
       </p>
       <form className="flex flex-col gap-2" onSubmit={(e) => { e.preventDefault(); join(); }}>
-        <Input autoCapitalize="off" autoCorrect="off" spellCheck={false} aria-label="Invite link" placeholder="cube+wss://relay.example.com/#invite=…" value={link} onChange={(e) => setLink(e.target.value)} className="selectable h-9" data-notranslate />
+        <Input autoCapitalize="off" autoCorrect="off" spellCheck={false} aria-label="Invite link" placeholder="https://relay.example.com/join#invite=…" value={link} onChange={(e) => setLink(e.target.value)} className="selectable h-9" data-notranslate />
         <div className="flex flex-wrap items-center gap-2">
           <Input aria-label="Your name in the team" placeholder="Your name in the team" value={name} onChange={(e) => setName(e.target.value)} className="selectable h-9 w-[240px]" />
           <button type="submit" className={primary} disabled={busy || !link.trim() || !name.trim()}>{busy ? "Joining…" : "Join"}</button>
@@ -96,7 +150,6 @@ function Members() {
   const team = useCube((s) => s.team);
   const live = useCube((s) => s.teamLive);
   const setLive = useCube((s) => s.setTeamLive);
-  const [copied, setCopied] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const canManage = team.me?.role === "owner" || team.me?.role === "admin";
   // A link made for one channel is shown in that channel, not here.
@@ -125,7 +178,7 @@ function Members() {
         <ul className="flex flex-col">
           {team.members.map((m) => (
             <li key={m.pubkey} className="flex items-center gap-3 border-b py-2.5 last:border-b-0">
-              <span className="flex size-8 flex-none items-center justify-center rounded-full bg-secondary font-semibold" aria-hidden="true" data-notranslate>{m.name.charAt(0).toUpperCase()}</span>
+              <Face pubkey={m.pubkey} name={m.name} size={32} />
               <div className="min-w-0 flex-1">
                 <div className="truncate font-medium" data-notranslate>{nameOf(m.pubkey, team.members)}{m.pubkey === team.info?.pubkey && <span className="font-normal text-muted-foreground"> (you)</span>}</div>
                 <div className="text-[13px] text-muted-foreground">{ROLE[m.role]} · <span className="font-mono text-xs" data-notranslate title={m.pubkey}>{m.pubkey.slice(0, 12)}…</span></div>
@@ -151,21 +204,7 @@ function Members() {
       {canManage && (
         <Section title="Invite someone">
           <p className="mb-3 text-[13px] text-muted-foreground">An invite link works once and for seven days. Send it to one person, over a channel you trust: whoever opens it first joins as a member and can read every channel shared with the whole team, from its beginning.</p>
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className={primary} disabled={!live.connected} onClick={() => { setCopied(false); void askInvite().catch((e) => setLive({ problem: String(e) })); }}>Make an invite link</button>
-            {teamInvite && (
-              <>
-                <code className="selectable min-w-0 flex-1 truncate rounded-lg bg-secondary px-2.5 py-1.5 text-xs" data-notranslate>{teamInvite}</code>
-                <button type="button" className={pill} onClick={() => void navigator.clipboard.writeText(teamInvite ?? "").then(() => setCopied(true))}>{copied ? "Copied" : "Copy link"}</button>
-              </>
-            )}
-          </div>
-          {teamInvite && (
-            <div className="mt-3 flex flex-wrap items-center gap-4">
-              <InviteQr link={teamInvite} />
-              <p className="min-w-[200px] flex-1 text-[13px] text-muted-foreground">The same link as a QR code. Your teammate pastes the link into Settings &gt; People &gt; Join a team in their Cube. Whoever has the link or a picture of this code can join once, so do not post it where others can see it.</p>
-            </div>
-          )}
+          <InviteLinkBox link={teamInvite} disabled={!live.connected} subject={team.info.workspace} onMake={(uses) => void askInvite(undefined, uses).catch((e) => setLive({ problem: String(e) }))} />
         </Section>
       )}
     </>

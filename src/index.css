@@ -251,3 +251,6 @@
   .rolling-in, .rolling-out, .helper-live .helper-mark, .helper-canvas::after, .helper-result { animation: none; }
   .rolling-out { display: none; }
 }
+
+/* What is said in a conversation can be set larger or smaller than the rest of the app. */
+.chat-text { font-size: var(--chat-size, inherit); }

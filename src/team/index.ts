@@ -4,7 +4,8 @@ import { adopt as adoptOffer, offer, type SharedAgent } from "@/agents/subagents
 import { AGENTS, ROUTER, agentById } from "@/agents/types";
 import { maskSecrets } from "@/lib/secrets";
 import { useCube, type Conv, type Msg } from "@/state/store";
-import { applyEvent, dmId, dmPeer, inviteLink, postBody, shareable, type TeamEvent, type TeamMember } from "./events";
+import { notify } from "@/lib/notify";
+import { applyEvent, dmId, dmPeer, inviteLink, normalizeInvite, postBody, shareable, taggedIn, type TeamEvent, type TeamMember } from "./events";
 
 export * from "./events";
 
@@ -84,10 +85,21 @@ function take(e: TeamEvent): void {
     // A teammate's own words, written just now, in a channel where they may call this person's
     // cubes. History being caught up after a reconnect is not a request.
     const conv = s.convs.find((c) => c.id === change.msg.convId);
+    // Being tagged, or written to directly, is told to the person. Only for what was just said: catching up after a reconnect is not news.
+    const fresh = Date.now() - change.msg.ts < 120_000;
+    const who = change.msg.from?.agent ? `${change.msg.from.name} · ${change.msg.from.agent}` : (change.msg.from?.name ?? "Someone");
+    if (fresh && conv && !change.msg.from?.agent && conv.person) void notify(who, change.msg.text);
+    else if (fresh && conv && taggedIn(change.msg.text, s.team.members).includes(me)) void notify(`${who} · #${conv.name}`, change.msg.text);
     if (conv?.shared?.open && !change.msg.from?.agent && Date.now() - change.msg.ts < 120_000) onOutside?.(conv.id, change.msg.id);
   }
   else if (change.t === "edit") s.patchMsg(change.id, { text: change.text, edited: true });
   else if (change.t === "delete") s.deleteMsg(change.id);
+  else if (change.t === "avatar") {
+    const avatars = { ...s.team.avatars };
+    if (change.avatar) avatars[change.pubkey] = change.avatar;
+    else delete avatars[change.pubkey];
+    s.setTeam({ avatars });
+  }
   else if (change.t === "offer") s.setTeam({ agents: [...(s.team.agents ?? []).filter((a) => a.key !== change.agent.key), change.agent] });
   else if (change.t === "withdraw") s.setTeam({ agents: (s.team.agents ?? []).filter((a) => a.key !== change.key) });
 }
@@ -113,7 +125,7 @@ function flush(): void {
       const first = m.sent === undefined;
       const parent = m.parentId && s.messages.some((p) => p.id === m.parentId && (p.sent !== undefined || p.from)) ? m.parentId : undefined;
       sending.add(m.id);
-      teamPublish(first ? "msg.post" : "msg.edit", postBody(shared.id, m.id, text, first, agent ? { id: agent.id, name: agent.name } : undefined, parent))
+      teamPublish(first ? "msg.post" : "msg.edit", postBody(shared.id, m.id, text, first, agent ? { id: agent.id, name: agent.name, color: agent.color } : undefined, parent))
         .then(() => store().patchMsg(m.id, { sent: text }))
         .catch((err) => store().setTeamLive({ problem: String(err) }))
         .finally(() => sending.delete(m.id));
@@ -130,6 +142,22 @@ function flush(): void {
 function later(): void {
   window.clearTimeout(timer);
   timer = window.setTimeout(flush, 400);
+}
+
+/** Sends this person's picture to the team when it is not the one the team has. */
+export function shareAvatar(): void {
+  const s = store();
+  const mine = s.avatar ?? "";
+  if (!s.team.info || !s.teamLive.connected || !s.team.features?.includes("profiles") || mine === (s.team.avatarSent ?? "")) return;
+  teamPublish("profile.put", JSON.stringify({ avatar: mine }))
+    .then(() => store().setTeam({ avatarSent: mine }))
+    .catch(() => undefined);
+}
+
+/** Sets or removes this person's picture, here and for the team. */
+export function setMyAvatar(avatar: string | undefined): void {
+  store().setAvatar(avatar);
+  shareAvatar();
 }
 
 /** True when the relay keeps channel members, so private channels and channel invites work. */
@@ -165,6 +193,7 @@ export async function startTeam(outside?: (convId: string, msgId: string) => voi
         const settings = (v.settings ?? {}) as { member_invites?: boolean };
         s.setTeam({ me: { name: you.name, role: you.role }, members: v.members as TeamMember[], head, features: Array.isArray(v.features) ? (v.features as string[]) : [], memberInvites: settings.member_invites !== false });
         void teamAsk({ t: "sync", after: head }).catch(() => undefined);
+        shareAvatar();
         // Histories that were being fetched when the connection went are picked up where they stopped.
         for (const [conv, after] of Object.entries(s.team.pulls ?? {})) void teamAsk({ t: "sync", after, conv }).catch(() => undefined);
         later();
@@ -215,13 +244,20 @@ export async function startTeam(outside?: (convId: string, msgId: string) => voi
         break;
       }
       case "invite":
-        if (s.team.info) s.setTeamLive({ invite: inviteLink(s.team.info.host, String(v.token)), inviteFor: typeof v.conv === "string" ? v.conv : askedFor, problem: "" });
+        if (s.team.info) s.setTeamLive({ invite: inviteLink(s.team.info.host, String(v.token), Boolean(s.team.features?.includes("join-page"))), inviteFor: typeof v.conv === "string" ? v.conv : askedFor, problem: "" });
         break;
       case "error":
         s.setTeamLive({ problem: String(v.message ?? "The relay refused that.") });
         break;
     }
   });
+  // Invite links that are clicked in a browser or a mail arrive here, while Cube runs or as it starts.
+  void import("@tauri-apps/plugin-deep-link")
+    .then(async (links) => {
+      await links.onOpenUrl(received);
+      received(await links.getCurrent());
+    })
+    .catch(() => undefined);
   const info = await teamInfo().catch(() => null);
   store().setTeam({ info: info ?? undefined, ...(info ? {} : { me: undefined, members: [], head: 0 }) });
   // Not in a team (any more): channels that were shared are ordinary local channels again.
@@ -235,7 +271,9 @@ export async function startTeam(outside?: (convId: string, msgId: string) => voi
 
 /** Accepts an invite link under a display name. */
 export async function joinTeam(link: string, name: string): Promise<void> {
-  const info = await teamJoin(link, name);
+  const invite = normalizeInvite(link);
+  if (!invite) throw new Error("That is not an invite link. Paste the whole link you were sent.");
+  const info = await teamJoin(invite, name);
   // Only what the join itself tells. The relay's first greeting (who the members are) may
   // already have arrived by now, and must not be wiped.
   store().setTeam({ info });
@@ -247,7 +285,7 @@ export async function leaveTeam(): Promise<void> {
   const s = store();
   for (const c of sharedConvs()) s.setConvShared(c.id, undefined);
   published.clear();
-  s.setTeam({ info: undefined, me: undefined, members: [], head: 0, agents: [], pulls: {}, features: [] });
+  s.setTeam({ info: undefined, me: undefined, members: [], head: 0, agents: [], pulls: {}, features: [], avatars: {}, avatarSent: undefined });
   for (const sub of s.subagents) if (sub.shared) s.putSubagent({ ...sub, shared: false });
   s.setTeamLive({ connected: false, problem: "", invite: undefined, inviteFor: undefined, convMembers: {} });
 }
@@ -297,11 +335,19 @@ export async function removeFromConv(convId: string, pubkey: string): Promise<vo
 let askedFor: string | undefined;
 
 /** Asks for an invite link. With a channel, whoever opens it joins the team and lands in that channel. */
-export function askInvite(convId?: string): Promise<void> {
+export function askInvite(convId?: string, uses = 1): Promise<void> {
   const shared = convId ? store().convs.find((c) => c.id === convId)?.shared : undefined;
   askedFor = shared?.id;
   store().setTeamLive({ invite: undefined, inviteFor: undefined });
-  return teamAsk({ t: "invite.create", ...(shared ? { conv: shared.id } : {}) });
+  return teamAsk({ t: "invite.create", ...(shared ? { conv: shared.id } : {}), ...(uses > 1 ? { uses: Math.min(Math.floor(uses), 100) } : {}) });
+}
+
+/** An invite opened outside Cube is kept until the person has looked at where it leads and said yes. Nothing is joined by a link alone. */
+function received(urls: string[] | null): void {
+  for (const url of urls ?? []) {
+    const invite = normalizeInvite(url);
+    if (invite) return store().setTeamLive({ pending: invite });
+  }
 }
 
 /** Lets ordinary members bring new people in with channel links, or keeps that to the owner and admins. */

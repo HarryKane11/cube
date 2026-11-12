@@ -5,7 +5,7 @@ import { hasBuiltinSession, startBuiltin } from "./builtin";
 import { startRemote } from "./remote";
 import type { SubAgent } from "./subagents";
 import { knowledgeTick, listKnowledge } from "../knowledge";
-import { fenced, removeFromConv, startTeam, unshareConv } from "../team";
+import { fenced, removeFromConv, startTeam, taggedIn, unshareConv } from "../team";
 import { checkScopes, startSlack } from "../slack";
 import { customAdapter, parseManifest, type Manifest } from "./custom";
 import { startMock } from "./mock";
@@ -140,7 +140,9 @@ export function modeChanged(convId: string): void {
   // A cube that is already working cannot be turned back into one that only plans.
   if (mode === "plan") return;
   for (const run of [...active.values()]) {
-    if (run.convId !== convId || run.aside || run.guest || isLeadRole(run.agentId)) continue;
+    if (run.convId !== convId || run.aside || isLeadRole(run.agentId)) continue;
+    // A run a teammate started asks for everything. The person changing the mode while it is at
+    // work is them letting this one go on; the next one a teammate starts asks again.
     run.after = mode === "manual" ? undefined : sharedCap(run.convId, trustFor(mode, st.trust[run.agentId]));
     if (!run.after) continue;
     for (const [askId, asked] of [...run.pending]) {
@@ -195,7 +197,11 @@ export function runOpts(agent: AgentDef, engine: AgentKind, convId: string): Run
  * the conversation's mode is set, a cube there asks before it runs anything.
  */
 export function sharedCap(convId: string, trust: Trust): Trust {
-  return convById(convId)?.shared && (trust === "auto" || trust === "free") ? "edits" : trust;
+  // In a channel other people write in, the mode set for everything does not give cubes a free
+  // hand: part of what they read there is not the person's. A mode the person picked for that
+  // very channel does, because that is them deciding it with the channel in front of them.
+  const chosenHere = store().modes[convId] !== undefined;
+  return convById(convId)?.shared && !chosenHere && (trust === "auto" || trust === "free") ? "edits" : trust;
 }
 
 /** Agent ids mentioned as @Name, in order, without duplicates. */
@@ -1046,6 +1052,8 @@ export function send(convId: string, raw: string, parentId?: string, opts: SendO
     if (!targets.length) targets = inConv(mentions(text));
     // What is written to a person is for the person. A cube comes in only when it is named.
     if (conv.person && !targets.length) return;
+    // The same for a message in a shared channel that tags a teammate and no cube.
+    if (conv.shared && !targets.length && taggedIn(text, s.team.members.filter((m) => m.pubkey !== s.team.info?.pubkey)).length) return;
     // Stepping into a plan goes to the one running it, not to every teammate that was stopped.
     if (!targets.length && interrupted.length) targets = hasOrch && (planned || interrupted.includes(ORCH)) ? [ORCH] : interrupted.filter((id) => id !== ROUTER);
     // A side question with no name goes to whoever is at work.

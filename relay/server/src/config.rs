@@ -72,6 +72,8 @@ pub struct Config {
     pub public_host: String,
     /// Peers whose `X-Forwarded-For` is believed.
     pub trusted_proxies: Vec<IpAddr>,
+    /// Where the Cube app can be had, shown on the invite page. An `https://` address, or none.
+    pub app_url: Option<String>,
     pub limits: Limits,
 }
 
@@ -165,11 +167,18 @@ impl Config {
             }
         }
 
+        let app_url = match get("CUBE_RELAY_APP_URL") {
+            Some(url) if url.starts_with("https://") && url.len() <= 300 && !url.chars().any(|c| c.is_control() || c.is_whitespace()) => Some(url),
+            Some(url) => return err(format!("CUBE_RELAY_APP_URL must be an https:// address with no spaces, got `{url}`")),
+            None => None,
+        };
+
         Ok(Config {
             bind,
             db_path,
             name,
             public_host,
+            app_url,
             trusted_proxies,
             limits: Limits::default(),
         })

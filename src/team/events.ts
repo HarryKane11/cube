@@ -1,4 +1,5 @@
 import { readOffer, type SharedAgent } from "@/agents/subagents";
+import { validAvatar } from "@/lib/avatar";
 import type { Msg } from "@/state/store";
 
 /** What can be decided about team events without the app around it: what a teammate's event changes here, and what of ours goes out. */
@@ -30,6 +31,8 @@ export type Change =
   | { t: "add"; msg: Msg }
   | { t: "edit"; id: string; text: string }
   | { t: "delete"; id: string }
+  /** A teammate set their picture, or took it away. */
+  | { t: "avatar"; pubkey: string; avatar?: string }
   | { t: "offer"; agent: SharedAgent }
   | { t: "withdraw"; key: string };
 
@@ -74,6 +77,10 @@ export function applyEvent(e: TeamEvent, ctx: Ctx): Change | null {
     const agent = readOffer(body, e.pubkey, nameOf(e.pubkey, ctx.members));
     return agent ? { t: "offer", agent } : null;
   }
+  if (e.kind === "profile.put") {
+    if (body.avatar === "") return { t: "avatar", pubkey: e.pubkey };
+    return validAvatar(body.avatar) ? { t: "avatar", pubkey: e.pubkey, avatar: body.avatar } : null;
+  }
   if (e.kind === "agent.drop") {
     const id = str(body.id, 128);
     return id ? { t: "withdraw", key: `${e.pubkey}:${id}` } : null;
@@ -94,7 +101,7 @@ export function applyEvent(e: TeamEvent, ctx: Ctx): Change | null {
     return { t: e.kind === "conv.add" ? "joined" : "parted", sharedId, member };
   }
   if (!convId) return null;
-  const from = (agent?: string) => ({ pubkey: e.pubkey, name: nameOf(e.pubkey, ctx.members), ...(agent ? { agent } : {}) });
+  const from = (agent?: string, color?: string) => ({ pubkey: e.pubkey, name: nameOf(e.pubkey, ctx.members), ...(agent ? { agent } : {}), ...(agent && color ? { color } : {}) });
 
   if (e.kind === "msg.post" || e.kind === "msg.edit") {
     const msg = (body.msg ?? {}) as Record<string, unknown>;
@@ -107,9 +114,11 @@ export function applyEvent(e: TeamEvent, ctx: Ctx): Change | null {
       if (e.kind !== "msg.edit" || have.from?.pubkey !== e.pubkey || have.convId !== convId) return null;
       return have.text === text ? null : { t: "edit", id, text };
     }
-    const agent = str((msg.agent as Record<string, unknown> | undefined)?.name, 80);
+    const wrote = msg.agent as Record<string, unknown> | undefined;
+    const agent = str(wrote?.name, 80);
+    const color = typeof wrote?.color === "string" && /^#[0-9a-fA-F]{6}$/.test(wrote.color) ? wrote.color : undefined;
     const parent = str(msg.parent, 128);
-    return { t: "add", msg: { id, convId, author: "peer", text, ts: e.created_at * 1000, from: from(agent), ...(parent && ctx.msgOf(parent)?.convId === convId ? { parentId: parent } : {}) } };
+    return { t: "add", msg: { id, convId, author: "peer", text, ts: e.created_at * 1000, from: from(agent, color), ...(parent && ctx.msgOf(parent)?.convId === convId ? { parentId: parent } : {}) } };
   }
   if (e.kind === "msg.delete") {
     const id = str(body.id, 128);
@@ -128,15 +137,41 @@ export function shareable(m: Msg, since: number): boolean {
 }
 
 /** The body of the event that posts or edits one of our messages. */
-export function postBody(sharedId: string, id: string, text: string, first: boolean, agent?: { id: string; name: string }, parent?: string): string {
+export function postBody(sharedId: string, id: string, text: string, first: boolean, agent?: { id: string; name: string; color?: string }, parent?: string): string {
   const msg = { ...(first ? { id } : {}), text: text.slice(0, 60_000), ...(agent ? { agent } : {}), ...(parent ? { parent } : {}) };
   return JSON.stringify(first ? { conv: sharedId, msg } : { conv: sharedId, id, msg });
 }
 
-/** The link that lets someone join, from the token the relay made. The token sits after `#`, so it stays out of server logs. */
-export function inviteLink(host: string, token: string): string {
-  const local = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host);
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+
+/**
+ * The link that lets someone join, from the token the relay made. The token sits after `#`, so it
+ * stays out of server logs. A relay that serves the invite page gets a web address people can
+ * click in a chat or a mail; the page hands the invite to Cube. Otherwise it is the form that is
+ * pasted into Cube.
+ */
+export function inviteLink(host: string, token: string, page = false): string {
+  const local = LOCAL_HOST.test(host);
+  if (page) return `${local ? "http" : "https"}://${host}/join#invite=${token}`;
   return `cube+${local ? "ws" : "wss"}://${host}/#invite=${token}`;
+}
+
+/**
+ * An invite in the one form Cube joins with (`cube+wss://host/#invite=token`), whichever way it
+ * arrived: pasted as it is, as the web address of the invite page, or as the `cube://` link that
+ * page opens. Undefined for anything else.
+ */
+export function normalizeInvite(text: string): string | undefined {
+  const link = text.trim();
+  const m = /^(cube\+wss|cube\+ws|cube|https|http):\/\/([A-Za-z0-9.\-[\]:]+)\/(join)?#invite=([A-Za-z0-9_-]{20,200})$/.exec(link);
+  if (!m) return undefined;
+  const [, scheme, host, page, token] = m;
+  // The web form only exists as the invite page; the others have nothing before the `#`.
+  if ((scheme === "https" || scheme === "http") !== Boolean(page)) return undefined;
+  const local = LOCAL_HOST.test(host);
+  // Without encryption only to this computer itself, however the link was written.
+  if ((scheme === "http" || scheme === "cube+ws") && !local) return undefined;
+  return `cube+${local ? "ws" : "wss"}://${host.toLowerCase()}/#invite=${token}`;
 }
 
 /** The relay id of the direct conversation between two people. Both sides arrive at the same one. */
@@ -156,4 +191,24 @@ export function dmPeer(sharedId: string, me: string, members: TeamMember[]): Tea
   if (!other || other.length !== 20) return undefined;
   const found = members.filter((m) => m.pubkey !== me && m.pubkey.startsWith(other));
   return found.length === 1 ? found[0] : undefined;
+}
+
+/** The word a person is tagged by: their name as teammates see it, without the spaces. */
+export const tagOf = (name: string) => name.replace(/\s+/g, "");
+
+/** The members a text tags with `@Name`. A name that is the start of a longer word is not a tag. */
+export function taggedIn(text: string, members: TeamMember[]): string[] {
+  const lower = text.toLowerCase();
+  return members
+    .filter((m) => {
+      const tag = `@${tagOf(m.name).toLowerCase()}`;
+      if (tag.length < 2) return false;
+      for (let at = lower.indexOf(tag); at >= 0; at = lower.indexOf(tag, at + 1)) {
+        const before = at === 0 ? " " : lower[at - 1];
+        const after = lower[at + tag.length] ?? " ";
+        if (!/[\p{L}\p{N}@]/u.test(before) && !/[\p{L}\p{N}]/u.test(after)) return true;
+      }
+      return false;
+    })
+    .map((m) => m.pubkey);
 }

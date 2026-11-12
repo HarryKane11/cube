@@ -5,7 +5,9 @@ import { MODES, agentById, type AgentDef, type Mode } from "@/agents/types";
 import { AtIcon, ChevronIcon, ClipIcon, CloseIcon, MicIcon, SendIcon, StopIcon } from "@/components/icons";
 import { kindOf } from "@/lib/files";
 import { PromptInput, PromptInputActions, PromptInputTextarea } from "@/components/ui/prompt-input";
+import { Face } from "@/components/bits";
 import { Rolling } from "@/components/Rolling";
+import { tagOf } from "@/team";
 import { Cube, CubeStill } from "@/cube/Cube";
 import { cn } from "@/lib/utils";
 import { useBusy, useCube, type Conv } from "@/state/store";
@@ -28,6 +30,18 @@ function NowWorking({ conv }: { conv: Conv }) {
       ))}
     </div>
   );
+}
+
+/** Someone the "@" picker offers: a cube of this conversation, or a teammate in it. */
+interface Pick {
+  key: string;
+  /** What is written after the "@". */
+  name: string;
+  note: string;
+  agent?: AgentDef;
+  pubkey?: string;
+  /** A teammate's name as it is shown, spaces and all. */
+  shown?: string;
 }
 
 const MODE_TONE: Record<Mode, string> = {
@@ -61,6 +75,7 @@ function recognizer(): Recognizer | null {
 /** Picks how this conversation's cubes behave from the next message on: ask, run to the end, or skip every check. */
 function ModePicker({ convId }: { convId: string }) {
   const mode = useCube((s) => s.modes[convId] ?? s.settings.mode);
+  const shared = useCube((s) => Boolean(s.convs.find((c) => c.id === convId)?.shared));
   const setConvMode = useCube((s) => s.setConvMode);
   const [open, setOpen] = useState(false);
   const now = MODES.find((m) => m.id === mode) ?? MODES[0];
@@ -98,6 +113,11 @@ function ModePicker({ convId }: { convId: string }) {
               </button>
             </li>
           ))}
+          {shared && (
+            <li role="none" className="mx-2.5 mt-1 border-t pt-1.5 pb-1 text-xs text-muted-foreground">
+              Other people write in this channel. What you pick here is used here: with Auto or Bypass, your cubes act on what they read without asking you. A cube a teammate starts still asks, unless you change the mode while it is at work.
+            </li>
+          )}
         </ul>
       )}
     </div>
@@ -191,14 +211,24 @@ export function Composer({ conv, parentId }: { conv: Conv; parentId?: string }) 
   }, [quote, setQuote]);
 
   // An "@" being typed at the end of the draft opens the member picker.
-  const partial = conv.kind === "channel" && !closed ? draft.match(/(?:^|\s)@([A-Za-z]*)$/)?.[1] : undefined;
+  const partial = conv.kind === "channel" && !closed ? draft.match(/(?:^|\s)@([\p{L}\p{N}]*)$/u)?.[1] : undefined;
+  const team = useCube((s) => s.team);
+  const inChannel = useCube((s) => (conv.shared ? s.teamLive.convMembers?.[conv.shared.id] : undefined));
   const options = useMemo(() => {
     if (partial === undefined) return [];
-    return conv.members
+    const starts = (name: string) => name.toLowerCase().startsWith(partial.toLowerCase());
+    const cubes: Pick[] = conv.members
       .map((id) => agentById(id))
       .filter((a): a is AgentDef => Boolean(a))
-      .filter((a) => a.name.toLowerCase().startsWith(partial.toLowerCase()));
-  }, [partial, conv.members]);
+      .filter((a) => starts(a.name))
+      .map((a) => ({ key: a.id, name: a.name, note: a.role, agent: a }));
+    // In a shared channel the people in it can be tagged too: they are told, and no cube takes the message.
+    const people: Pick[] = !conv.shared ? [] : team.members
+      .filter((m) => m.pubkey !== team.info?.pubkey && (!conv.shared?.private || conv.person || inChannel?.includes(m.pubkey)))
+      .filter((m) => starts(tagOf(m.name)))
+      .map((m) => ({ key: m.pubkey, name: tagOf(m.name), note: "Teammate", pubkey: m.pubkey, shown: m.name }));
+    return [...people, ...cubes];
+  }, [partial, conv.members, conv.shared, conv.person, team, inChannel]);
   const open = options.length > 0;
 
   const change = (v: string) => {
@@ -206,7 +236,7 @@ export function Composer({ conv, parentId }: { conv: Conv; parentId?: string }) 
     setClosed(false);
     setPick(0);
   };
-  const choose = (a: AgentDef) => change(draft.replace(/@([A-Za-z]*)$/, `@${a.name} `));
+  const choose = (a: Pick) => change(draft.replace(/@([\p{L}\p{N}]*)$/u, `@${a.name} `));
   const submit = (aside = false) => {
     if ((!draft.trim() && !files.length) || sending) return;
     rec.current?.stop();
@@ -270,18 +300,18 @@ export function Composer({ conv, parentId }: { conv: Conv; parentId?: string }) 
         </ul>
       )}
       {open && (
-        <ul role="listbox" aria-label="Mention an agent" className="absolute bottom-full left-3 z-20 mb-1 w-60 overflow-hidden rounded-xl border bg-popover p-1 shadow-md">
+        <ul role="listbox" aria-label="Mention a cube or a teammate" className="absolute bottom-full left-3 z-20 mb-1 w-60 overflow-hidden rounded-xl border bg-popover p-1 shadow-md">
           {options.map((a, i) => (
-            <li key={a.id} role="option" aria-selected={i === pick}>
+            <li key={a.key} role="option" aria-selected={i === pick}>
               <button
                 type="button"
                 className={cn("flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left", i === pick && "bg-accent")}
                 onMouseEnter={() => setPick(i)}
                 onMouseDown={(e) => { e.preventDefault(); choose(a); }}
               >
-                <CubeStill color={a.color} size={28} />
-                <span className="font-medium">{a.name}</span>
-                <span className="ml-auto text-xs text-muted-foreground">{a.role}</span>
+                {a.agent ? <CubeStill color={a.agent.color} size={28} /> : <Face pubkey={a.pubkey} name={a.shown} size={26} className="mx-px" />}
+                <span className="font-medium" data-notranslate>{a.shown ?? a.name}</span>
+                <span className="ml-auto text-xs text-muted-foreground">{a.note}</span>
               </button>
             </li>
           ))}

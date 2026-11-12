@@ -410,3 +410,21 @@ the conversation, not the files.
   obtained out of band and never travel in messages, and transport is TLS.
 - Deliberately not taken: Nostr compatibility (other relays and clients have no business in a
   team's workspace) and giving every agent its own key (in version 1 the owner signs for it).
+
+## Invite links people can click
+
+A relay that lists `join-page` in `ready.features` serves `GET /join`: a static page, identical
+for every visitor, with a strict content security policy, no referrer and no caching. An invite
+is handed out as `https://<host>/join#invite=<token>` (`http://` only for a relay on this
+computer). The token is in the fragment, so it is never sent to the relay or written to a log.
+The page reads it and offers one button whose address is `cube://<host>/#invite=<token>`; the
+Cube app is registered for the `cube` scheme. The page also shows the `cube+wss://…` form for
+pasting by hand.
+
+The app treats all three forms as the same invite and turns them into
+`cube+wss://<host>/#invite=<token>` before joining. A link never joins by itself: the app shows
+which server the invite leads to and asks for the name to join under. Plain `http://` and
+`cube+ws://` are accepted only for `localhost`, `127.0.0.1` and `[::1]`.
+
+`invite.create` takes `uses` (1 to 100, default 1). A link for several people lets in whoever
+has it until that many have joined, so it is the caller's choice and never the default.

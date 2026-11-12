@@ -104,6 +104,7 @@ Everything is read from the environment. There are no secrets to configure.
 | `CUBE_RELAY_NAME` | workspace name shown to members (at most 100 characters) | `Team` |
 | `CUBE_RELAY_PUBLIC_HOST` | host (and port, if not 443) clients dial, e.g. `relay.example.com`; no scheme, no path; lower-cased | required unless bound to a loopback address, where it defaults to the bind address |
 | `CUBE_RELAY_TRUSTED_PROXY` | comma-separated IP addresses (no CIDR ranges) of proxies whose `X-Forwarded-For` is believed | none |
+| `CUBE_RELAY_APP_URL` | `https://` address where the Cube app can be had; shown on the invite page | none |
 | `RUST_LOG` | log filter for stderr, e.g. `debug` or `cube_relay=debug` | `info` |
 
 The relay refuses to start when `CUBE_RELAY_BIND` is not a loopback address and
@@ -114,6 +115,11 @@ appears to come from the proxy, and ten failed handshakes by anyone lock everyon
 minute. With it, the client address is the right-most `X-Forwarded-For` entry that is not itself a
 trusted proxy; the proxy must overwrite or append to that header, never pass a client-supplied
 value through as the last entry.
+
+`GET /join` is the page an invite link opens in a browser (`https://<host>/join#invite=…`). It is
+the same for every visitor: the invite sits after the `#`, which a browser does not send, so the
+relay never sees it. The page's button hands the invite to the Cube app (`cube://<host>/#invite=…`).
+Behind a proxy, forward `/join` along with `/ws` and `/healthz` (the example `Caddyfile` does).
 
 Commands: `cube-relay` (serve), `cube-relay owner-invite [--days N]`, `cube-relay --version`.
 

@@ -4,9 +4,10 @@ import { KEPT_CHANNELS, createChannel, deleteChannel } from "@/agents/orchestrat
 import { inTauri } from "@/agents/runner";
 import { ChannelPeople } from "@/components/ChannelPeople";
 import { RightClick } from "@/components/ui/context-menu";
+import { SHORTCUTS, commandFor } from "@/lib/shortcuts";
 import { nameOf, openDm, renameChannel } from "@/team";
 import { AGENTS, agentById } from "@/agents/types";
-import { PersonAvatar } from "@/components/bits";
+import { Face, PersonAvatar } from "@/components/bits";
 import { BookIcon, GearIcon, HashIcon, HomeIcon, InboxIcon, PanelIcon, PlusIcon, SearchIcon, LockIcon } from "@/components/icons";
 import { useInboxCount } from "@/components/Inbox";
 import { Palette } from "@/components/Palette";
@@ -18,9 +19,23 @@ import { useCube, type Conv } from "@/state/store";
 
 const WORD: Record<string, string> = { thinking: "thinking", working: "working", needs: "needs you", stuck: "stuck", done: "done" };
 
-/** A person's mark where a cube would be: the first letter of their name. */
-function Initial({ name, size }: { name: string; size: number }) {
-  return <span className="mx-0.5 flex flex-none items-center justify-center rounded-full bg-secondary font-semibold text-foreground" style={{ width: size, height: size, fontSize: size * 0.42 }} aria-hidden="true" data-notranslate>{name.trim().charAt(0).toUpperCase() || "?"}</span>;
+/** Every shortcut with what it does. */
+export function ShortcutList() {
+  return (
+    <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-4 gap-y-1.5 text-[13px]">
+      {SHORTCUTS.map((s) => (
+        <div key={s.keys} className="contents">
+          <dt><kbd className="rounded-md bg-secondary px-1.5 py-0.5 font-sans text-xs font-semibold" data-notranslate>{s.keys}</kbd></dt>
+          <dd className="text-muted-foreground">{s.does}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** A teammate where a cube would be: their picture, or the first letter of their name. */
+function Initial({ name, size, pubkey }: { name: string; size: number; pubkey?: string }) {
+  return <Face pubkey={pubkey ?? "?"} name={name} size={size} className="mx-0.5" />;
 }
 
 /** Picks the teammate to write to. */
@@ -39,7 +54,7 @@ function NewDm({ onClose }: { onClose: () => void }) {
           {others.map((m) => (
             <li key={m.pubkey}>
               <button type="button" className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-accent" onClick={() => void openDm(m.pubkey).then(onClose).catch((e) => setError(String(e)))}>
-                <Initial name={m.name} size={28} />
+                <Initial name={m.name} size={28} pubkey={m.pubkey} />
                 <span className="min-w-0 flex-1 truncate" data-notranslate>{nameOf(m.pubkey, team.members)}</span>
               </button>
             </li>
@@ -160,7 +175,7 @@ function RowButton({ conv, rail }: { conv: Conv; rail?: boolean }) {
         className={cn("relative flex size-10 items-center justify-center rounded-xl", active ? "bg-secondary" : "hover:bg-accent")}
         onClick={() => setActive(conv.id)}
       >
-        {agent ? <Cube color={agent.color} status={status} size={30} /> : conv.person ? <Initial name={conv.name} size={28} /> : <HashIcon className="text-muted-foreground" width={17} height={17} />}
+        {agent ? <Cube color={agent.color} status={status} size={30} /> : conv.person ? <Initial name={conv.name} size={28} pubkey={conv.person.pubkey} /> : <HashIcon className="text-muted-foreground" width={17} height={17} />}
         {(unread > 0 || status === "needs") && <span className="absolute right-1 top-1 size-2 rounded-full bg-primary" />}
       </button>
     );
@@ -177,7 +192,7 @@ function RowButton({ conv, rail }: { conv: Conv; rail?: boolean }) {
       )}
       onClick={() => setActive(conv.id)}
     >
-      {agent ? <Cube color={agent.color} status={status} size={32} /> : conv.person ? <Initial name={conv.name} size={28} /> : conv.shared?.private ? <LockIcon className="mx-1.5 text-muted-foreground" width={16} height={16} /> : <HashIcon className="mx-1.5 text-muted-foreground" width={16} height={16} />}
+      {agent ? <Cube color={agent.color} status={status} size={32} /> : conv.person ? <Initial name={conv.name} size={28} pubkey={conv.person.pubkey} /> : conv.shared?.private ? <LockIcon className="mx-1.5 text-muted-foreground" width={16} height={16} /> : <HashIcon className="mx-1.5 text-muted-foreground" width={16} height={16} />}
       <span className="min-w-0 flex-1 truncate">{conv.name}</span>
       {!agent && busy && <span className="size-1.5 animate-pulse rounded-full bg-primary" aria-label="Agents are working here" />}
       {agent && WORD[status] && !unread && (
@@ -260,16 +275,32 @@ export function Sidebar() {
   const wide = useCube((s) => s.settings.sidebar);
   const setSetting = useCube((s) => s.setSetting);
 
+  const [help, setHelp] = useState(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey)) return;
-      if (e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setSwitching((v) => !v);
-      } else if (e.key.toLowerCase() === "b" && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        const s = useCube.getState();
-        s.setSetting("sidebar", !s.settings.sidebar);
+      if (!(e.metaKey || e.ctrlKey) || e.isComposing) return;
+      const cmd = commandFor(e);
+      if (!cmd) return;
+      e.preventDefault();
+      const s = useCube.getState();
+      // The order conversations are listed in, so a number or an arrow means what the eye sees.
+      const order = [...s.convs.filter((c) => c.kind === "channel" && !c.person), ...s.convs.filter((c) => c.person), ...s.convs.filter((c) => c.kind === "dm")];
+      if (cmd.t === "switch") setSwitching((v) => !v);
+      else if (cmd.t === "sidebar") s.setSetting("sidebar", !s.settings.sidebar);
+      else if (cmd.t === "settings") s.openSettings();
+      else if (cmd.t === "channel") setCreating(true);
+      else if (cmd.t === "dm") { if (s.team.info) setDmOpen(true); }
+      else if (cmd.t === "invite") window.dispatchEvent(new Event("cube:invite"));
+      else if (cmd.t === "help") setHelp((v) => !v);
+      else if (cmd.t === "nth") { const to = order[cmd.n - 1]; if (to) s.setActive(to.id); }
+      else if (cmd.t === "step") {
+        const at = s.view === "conv" ? order.findIndex((c) => c.id === s.activeId) : -1;
+        const to = order[at < 0 ? 0 : (at + cmd.by + order.length) % order.length];
+        if (to) s.setActive(to.id);
+      } else if (cmd.t === "stage" && s.view === "conv") {
+        const id = s.activeId;
+        const open = s.stage[id] ? s.stage[id] === "open" : (s.files[id]?.length ?? 0) + (s.shots[id]?.length ?? 0) > 0 || Boolean(s.follow[id]);
+        s.setStage(id, open ? "closed" : "open");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -278,6 +309,22 @@ export function Sidebar() {
 
   const label = "px-2 pb-1 pt-4 text-xs font-semibold text-muted-foreground";
   const railButton = "flex size-10 items-center justify-center rounded-xl text-muted-foreground hover:bg-accent hover:text-foreground";
+  // What a shortcut can open, whichever form the sidebar is in.
+  const extras = (
+    <>
+      {dmOpen && <NewDm onClose={() => setDmOpen(false)} />}
+      <Dialog open={help} onOpenChange={setHelp}>
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Keyboard shortcuts</DialogTitle>
+            <DialogDescription>⌘ is Ctrl on Windows and Linux.</DialogDescription>
+          </DialogHeader>
+          <ShortcutList />
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+
   if (!wide) {
     return (
       <nav className="flex min-h-0 flex-col items-center gap-1 overflow-y-auto pb-3 pt-9 [scrollbar-width:none]" aria-label="Workspace">
@@ -305,6 +352,8 @@ export function Sidebar() {
           <GearIcon />
         </button>
         <Palette open={switching} onOpenChange={setSwitching} />
+        <NewChannel open={creating} onOpenChange={setCreating} />
+        {extras}
       </nav>
     );
   }
@@ -374,7 +423,7 @@ export function Sidebar() {
         {convs.filter((c) => c.person).map((c) => <Row conv={c} key={c.id} />)}
         {convs.filter((c) => c.kind === "dm").map((c) => <Row conv={c} key={c.id} />)}
       </div>
-      {dmOpen && <NewDm onClose={() => setDmOpen(false)} />}
+      {extras}
 
       <div className="mt-auto flex items-center gap-2 px-2 pt-3">
         <PersonAvatar size={28} />

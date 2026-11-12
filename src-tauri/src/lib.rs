@@ -1127,6 +1127,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        // An invite link opened from a browser or a mail (`cube://<relay host>/#invite=…`) reaches the window through this.
+        .plugin(tauri_plugin_deep_link::init())
         .manage(Runs::default())
         .manage(Inputs::default())
         .manage(Terms::default())

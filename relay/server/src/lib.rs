@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod db;
+mod join;
 mod limiter;
 mod server;
 

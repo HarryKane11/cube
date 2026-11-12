@@ -26,7 +26,10 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$HOME/CubeSpaces/**", "$HOME/CubeSpaces/.preview/**"]
+        "scope": [
+          "$HOME/CubeSpaces/**",
+          "$HOME/CubeSpaces/.preview/**"
+        ]
       }
     }
   },
@@ -40,5 +43,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "cube"
+        ]
+      }
+    }
   }
 }
