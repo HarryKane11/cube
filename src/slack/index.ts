@@ -158,6 +158,7 @@ oauth_config:
       - app_mentions:read
       - channels:history
       - chat:write
+      - emoji:read
       - files:write
       - groups:history
       - im:history

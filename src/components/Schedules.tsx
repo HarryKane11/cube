@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { getHarness, inTauri } from "@/agents/runner";
 import { CloseIcon, PlusIcon } from "@/components/icons";
-import { nextRun, repeatOf, type Schedule } from "@/lib/schedule";
+import { nextRun, repeatOf, suggestSchedules, type Schedule, type Suggestion } from "@/lib/schedule";
 import { cn } from "@/lib/utils";
-import { useCube } from "@/state/store";
+import { useCube, labelOf } from "@/state/store";
 
 const REPEATS: { id: string; name: string; days: number[] }[] = [
   { id: "daily", name: "Every day", days: [] },
@@ -23,6 +24,19 @@ export function Schedules() {
   const [convId, setConvId] = useState("general");
   const [repeat, setRepeat] = useState("weekdays");
   const now = new Date();
+  // What the agent programs have connected (their MCP servers) says what is worth scheduling.
+  const available = useCube((s) => s.available);
+  const lang = useCube((s) => s.settings.lang);
+  const [tools, setTools] = useState<string[]>([]);
+  useEffect(() => {
+    if (!inTauri) return;
+    let alive = true;
+    void Promise.all((["claude", "codex", "hermes"] as const).filter((p) => available[p]).map((p) => getHarness(p).then((h) => h.mcp.map((m) => m.name)).catch(() => [] as string[])))
+      .then((found) => { if (alive) setTools([...new Set(found.flat())]); });
+    return () => { alive = false; };
+  }, [available.claude, available.codex, available.hermes]);
+  const offers = useMemo(() => suggestSchedules(tools, lang, schedules), [tools, lang, schedules]);
+  const take = (o: Suggestion) => save({ id: crypto.randomUUID(), convId: convs.some((c) => c.id === "general") ? "general" : (convs[0]?.id ?? "general"), text: o.text, time: o.time, days: o.days, on: true });
 
   const add = () => {
     if (!text.trim() || !/^\d\d:\d\d$/.test(time)) return;
@@ -52,7 +66,7 @@ export function Schedules() {
               </button>
               <div className="min-w-0 flex-1">
                 <div className="truncate font-medium">{s.text}</div>
-                <div className="truncate text-xs text-muted-foreground">{repeatOf(s)} at {s.time} · {conv ? (conv.kind === "dm" ? conv.name : `#${conv.name}`) : "a conversation that is gone"} · next: {nextRun(s, now)}</div>
+                <div className="truncate text-xs text-muted-foreground">{repeatOf(s)} at {s.time} · {conv ? labelOf(conv) : "a conversation that is gone"} · next: {nextRun(s, now)}</div>
               </div>
               <button type="button" aria-label="Delete this schedule" title="Delete" className="flex size-7 flex-none items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => remove(s.id)}>
                 <CloseIcon width={12} height={12} />
@@ -70,7 +84,7 @@ export function Schedules() {
               {REPEATS.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>
             <select aria-label="Where to send it" value={convId} onChange={(e) => setConvId(e.target.value)} className={cn(field, "bg-background")}>
-              {convs.map((c) => <option key={c.id} value={c.id}>{c.kind === "dm" ? c.name : `#${c.name}`}</option>)}
+              {convs.map((c) => <option key={c.id} value={c.id}>{labelOf(c)}</option>)}
             </select>
             <span className="flex-1" />
             <button type="button" className="h-8 rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={() => setAdding(false)}>Cancel</button>
@@ -81,6 +95,22 @@ export function Schedules() {
         <button type="button" className="flex h-8 w-fit items-center gap-1.5 rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={() => setAdding(true)}>
           <PlusIcon width={13} height={13} /> New schedule
         </button>
+      )}
+      {offers.length > 0 && (
+        <section className="mt-2 flex flex-col border-t pt-3" aria-label="Suggested schedules">
+          <p className="pb-1 text-xs font-semibold text-muted-foreground">Suggested, from the tools your agent programs have connected</p>
+          <ul className="flex flex-col">
+            {offers.map((o) => (
+              <li key={o.key} className="flex items-center gap-2 py-1.5">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium">{o.title}</div>
+                  <div className="truncate text-xs text-muted-foreground" title={o.text}><span>Weekdays</span> <span data-notranslate>{o.time}</span> · <span data-notranslate>{o.text}</span></div>
+                </div>
+                <button type="button" className="h-8 flex-none rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={() => take(o)}>Add</button>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
     </div>
   );

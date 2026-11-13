@@ -1,4 +1,5 @@
 /** The programs that can run an agent. A role cube is powered by one of them. */
+import { BUILT_IN_PROPS } from "../cube/props/catalog";
 export type AgentKind = "codex" | "claude" | "hermes" | "api" | "custom" | "remote";
 
 /** What a cube is doing right now. Drives its motion and its face. */
@@ -30,6 +31,8 @@ export interface AgentDef {
   away?: [string, string, string];
   /** For a sub-agent the person made: how it should go about its work, told to it at the start of a conversation. */
   instructions?: string;
+  /** What its cube holds or wears, from the catalog (src/cube/props): an id, or "none". */
+  prop?: string;
   /** A sub-agent the person made, as opposed to a role Cube comes with. */
   custom?: boolean;
 }
@@ -52,11 +55,19 @@ export const ROLE_DEFAULTS: Record<string, Partial<Record<AgentKind, { model?: s
 };
 
 /** One normalized event, whatever engine produced it. */
+/** One line of an agent's own list of what it is going to do. */
+export interface Todo {
+  text: string;
+  state: "pending" | "doing" | "done";
+}
+
 export type Ev =
   | { t: "session"; id: string }
   | { t: "delta"; text: string }
   | { t: "activity"; kind: ActKind; label: string; /** The command line, when the step runs one. */ cmd?: string }
   | { t: "file"; path: string }
+  /** The agent's own list of what it is going to do, as it stands now. Each one replaces the last. */
+  | { t: "todo"; items: Todo[] }
   /** A picture a tool handed back: a browser page, the screen, an image it opened. */
   | { t: "shot"; url: string; label: string }
   /** The agent wants to do something it may not do without the person's OK, and waits for the answer. */
@@ -65,6 +76,10 @@ export type Ev =
   | { t: "send"; line: string }
   /** The engine finished its turn; it exits once its input is closed. */
   | { t: "end" }
+  /** What the program says about the limits of the plan it is signed in with. Read in agents/usage.ts. */
+  | { t: "limits"; program: "claude" | "codex"; how: "read" | "event"; raw: unknown }
+  /** The model the program says it is running this turn on. */
+  | { t: "model"; model: string }
   /** What the run used, as far as the engine says. */
   | { t: "usage"; in?: number; out?: number; cost?: number }
   | { t: "error"; message: string };
@@ -103,6 +118,11 @@ export interface RunOpts {
   plain?: boolean;
   /** Unset means "edits". */
   trust?: Trust;
+  /**
+   * What to send in place of the prompt when the session to continue turns out to be gone and the
+   * program starts a new one: the whole of what a cube starting afresh is told.
+   */
+  freshPrompt?: string;
 }
 
 export interface Parser {
@@ -197,8 +217,8 @@ const BUILT_IN: AgentDef[] = [
   {
     id: ROUTER,
     name: "Router",
-    role: "Answers about Cube and brings in the right cube",
-    brief: "You are the front desk: you answer general questions about Cube and the team, and for a request nobody was named in you bring in the one teammate who should do it, or the Orchestrator when it takes several.",
+    role: "Talks with you, and brings in who fits",
+    brief: "You talk with the person and answer what you can yourself, in the way they like to be spoken to, which you learn as you go. When a request is a teammate's kind of work you bring that teammate in, or the Orchestrator when it takes several.",
     color: "#3A3A3C",
     palette: ["#48484A", "#8E8E93", "#2C2C2E"],
     prefers: ["codex", "claude", "hermes"],
@@ -280,6 +300,57 @@ export function setSubagents(defs: AgentDef[]): void {
   AGENTS.splice(BUILT_IN.length, AGENTS.length - BUILT_IN.length, ...defs);
 }
 
+
+/**
+ * What the built-in cubes are called in Korean. The English name stays the one a cube writes
+ * after an @ and the one prompts use, so the two are the same cube wherever either is written.
+ * A sub-agent keeps the name its maker gave it.
+ */
+export const KO_NAMES: Record<string, string> = {
+  // The Router is not shown as a role of its own. To the person it is Cube itself: the one who answers when nobody else has to.
+  [ROUTER]: "Cube", [ORCH]: "오케스트레이터", researcher: "리서처", writer: "라이터", builder: "빌더", designer: "디자이너", reviewer: "리뷰어",
+};
+
+/**
+ * The cube a word after an @ names. Korean puts its particles straight onto a name ("@Writer에게",
+ * "@오케스트레이터한테"), so the word may go on after the name, as long as what follows is not more
+ * Latin letters or digits: those would make it another name ("@WriterPro"). The longest name that
+ * fits wins.
+ */
+export function agentNamed(word: string): AgentDef | undefined {
+  const w = word.toLowerCase();
+  let best: { agent: AgentDef; length: number } | undefined;
+  for (const agent of AGENTS) {
+    for (const name of [agent.name, KO_NAMES[agent.id]]) {
+      const n = name?.toLowerCase();
+      if (!n || !w.startsWith(n) || /^[a-z0-9_]/.test(w.slice(n.length))) continue;
+      if (!best || n.length > best.length) best = { agent, length: n.length };
+    }
+  }
+  return best?.agent;
+}
+
+/** A cube's name as it is shown in a language. */
+export function nameIn(agent: { id: string; name: string }, lang: string): string {
+  if (agent.id === ROUTER) return KO_NAMES[ROUTER];
+  return lang === "ko" ? (KO_NAMES[agent.id] ?? agent.name) : agent.name;
+}
+
+/** The built-in cubes' English names put into Korean wherever they stand as a word of their own. A file name is left alone. */
+export function koNames(text: string): string {
+  // A Korean particle follows a name with no space ("Designer가"), so only Latin letters and digits make it a longer word.
+  return text.replace(/(?<![A-Za-z0-9_.\/-])(Router|Orchestrator|Researcher|Writer|Builder|Designer|Reviewer)(?![A-Za-z0-9_]|\.[a-z])/g, (name) => KO_NAMES[name.toLowerCase()] ?? name);
+}
+
+/**
+ * What a cube holds: what the person chose for it, else what its definition names (a sub-agent's
+ * is picked when it is set up), else what the cubes that come with Cube hold. Undefined when it
+ * holds nothing.
+ */
+export function propOf(agent: AgentDef, chosen: Record<string, string> = {}): string | undefined {
+  const picked = chosen[agent.id] ?? agent.prop ?? BUILT_IN_PROPS[agent.id];
+  return picked && picked !== "none" ? picked : undefined;
+}
 
 export function agentById(id: string): AgentDef | undefined {
   return AGENTS.find((a) => a.id === id);

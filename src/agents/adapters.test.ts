@@ -18,7 +18,20 @@ describe("codex adapter", () => {
     ]);
     const started = p.stdout('{"id":2,"result":{"thread":{"id":"t-1"}}}');
     expect(started[0]).toEqual({ t: "session", id: "t-1" });
-    expect(sends(started)).toEqual([{ id: 3, method: "turn/start", params: { threadId: "t-1", input: [{ type: "text", text: "hi", text_elements: [] }], effort: "high" } }]);
+    // Along with the turn it asks how much of the plan is left: that needs no turn of its own.
+    expect(sends(started)).toEqual([{ id: 9, method: "account/rateLimits/read" }, { id: 3, method: "turn/start", params: { threadId: "t-1", input: [{ type: "text", text: "hi", text_elements: [] }], effort: "high" } }]);
+  });
+
+  it("passes on the plan's limits, the model it runs on and its list of steps", () => {
+    const p = ADAPTERS.codex.command("hi", undefined, {}).parser!;
+    p.stdout('{"id":1,"result":{}}');
+    expect(p.stdout('{"id":2,"result":{"thread":{"id":"t-1"},"model":"gpt-x"}}')).toContainEqual({ t: "model", model: "gpt-x" });
+    const limits = { rateLimits: { planType: "pro", primary: { usedPercent: 24, windowDurationMins: 10080, resetsAt: 1800000000 } } };
+    expect(p.stdout(JSON.stringify({ id: 9, result: limits }))).toEqual([{ t: "limits", program: "codex", how: "read", raw: limits }]);
+    expect(p.stdout(JSON.stringify({ method: "account/rateLimits/updated", params: limits }))).toEqual([{ t: "limits", program: "codex", how: "event", raw: limits }]);
+    expect(p.stdout(JSON.stringify({ method: "turn/plan/updated", params: { threadId: "t-1", turnId: "u", plan: [{ step: "Read the code", status: "completed" }, { step: "Fix it", status: "inProgress" }, { step: "Test", status: "pending" }] } }))).toEqual([
+      { t: "todo", items: [{ text: "Read the code", state: "done" }, { text: "Fix it", state: "doing" }, { text: "Test", state: "pending" }] },
+    ]);
   });
 
   it("resumes a session, and starts a new thread when the old one is gone", () => {
@@ -96,6 +109,17 @@ describe("claude adapter", () => {
     ]);
     const failed = ADAPTERS.claude.parser();
     expect(failed.stdout('{"type":"result","is_error":true,"result":"Credit balance is too low"}')).toEqual([{ t: "error", message: "Credit balance is too low" }, { t: "end" }]);
+  });
+});
+
+describe("claude adapter, beyond the reply", () => {
+  it("passes on the model, the plan's limits and its list of steps", () => {
+    const p = ADAPTERS.claude.parser();
+    expect(p.stdout('{"type":"system","subtype":"init","session_id":"s-1","model":"claude-opus-5-5"}')).toEqual([{ t: "session", id: "s-1" }, { t: "model", model: "claude-opus-5-5" }]);
+    const info = { status: "allowed", rateLimitType: "five_hour", utilization: 0.4, resetsAt: 1800000000 };
+    expect(p.stdout(JSON.stringify({ type: "rate_limit_event", rate_limit_info: info }))).toEqual([{ t: "limits", program: "claude", how: "event", raw: info }]);
+    const todo = { type: "assistant", message: { content: [{ type: "tool_use", id: "x", name: "TodoWrite", input: { todos: [{ content: "Read", status: "completed" }, { content: "Write", status: "in_progress" }] } }] } };
+    expect(p.stdout(JSON.stringify(todo))).toEqual([{ t: "todo", items: [{ text: "Read", state: "done" }, { text: "Write", state: "doing" }] }]);
   });
 });
 

@@ -5,7 +5,7 @@ import { ENGINES, MODEL_HINTS } from "@/agents/types";
 import { BrandMark, RichText } from "@/components/bits";
 import { Section, Switch } from "@/components/Settings";
 import { Input } from "@/components/ui/input";
-import { exportKnowledge, importKnowledge, JOB_ABOUT, JOBS, knowledgeEngine, listKnowledge, runJob, stopJob, type JobKind } from "@/knowledge";
+import { exportKnowledge, importKnowledge, JOB_ABOUT, JOBS, knowledgeEngine, listKnowledge, runJob, stopJob, type JobKind, WIKI_CHOICES, WIKI_EVERY } from "@/knowledge";
 import { cn } from "@/lib/utils";
 import { useCube } from "@/state/store";
 
@@ -53,6 +53,15 @@ function WorkModel() {
         <datalist id="knowledge-models">{(k.engine ? MODEL_HINTS[k.engine] : []).map((m) => <option key={m} value={m} />)}</datalist>
       </div>
       <Switch label="Keep it up by itself" hint="Memory after a conversation goes quiet, the wiki when memory changed, skills when enough new work has piled up. Off: only when you press Run." checked={k.auto} onChange={(auto) => set({ auto })} />
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t py-3">
+        <div className="min-w-[200px] flex-1">
+          <label htmlFor="wiki-every" className="font-medium">How often the wiki is rewritten</label>
+          <div className="text-[13px] text-muted-foreground">At most this often, and only when memory has changed since.</div>
+        </div>
+        <select id="wiki-every" value={k.wikiEvery || WIKI_EVERY} disabled={!k.auto} onChange={(e) => set({ wikiEvery: Number(e.target.value) })} className="selectable h-9 rounded-xl border bg-transparent px-2.5 text-[13px] disabled:opacity-50">
+          {WIKI_CHOICES.map((h) => <option key={h} value={h}>{h === 24 ? "Once a day" : h === 1 ? "Every hour" : `Every ${h} hours`}</option>)}
+        </select>
+      </div>
     </>
   );
 }
@@ -157,18 +166,18 @@ function Library({ listing, reload }: { listing: KnowledgeListing | null; reload
         {listing && <span className="selectable min-w-0 flex-1 truncate text-right text-xs text-muted-foreground" data-notranslate title={listing.dir}>{listing.dir.replace(/^\/Users\/[^/]+/, "~")}</span>}
       </div>
       {!entries.length && <p className="py-2 text-[13px] text-muted-foreground">{shelf === "memory" ? "Nothing remembered yet. Run Memory after a few conversations, or bring in memories from other programs." : shelf === "skills" ? "No skills yet. They appear as ways of working prove themselves." : "No pages yet. Run Wiki once there is something in memory."}</p>}
-      <div className={cn("grid gap-3", open && "md:grid-cols-[minmax(0,240px)_minmax(0,1fr)]")}>
+      <div className={cn("grid grid-cols-[minmax(0,1fr)] gap-3", open && "md:grid-cols-[minmax(0,240px)_minmax(0,1fr)]")}>
         {entries.length > 0 && (
-          <ul className={cn("flex flex-col", open && "max-h-[520px] overflow-auto")} data-notranslate>
+          <ul className={cn("flex min-w-0 flex-col", open && "max-h-[520px] overflow-auto")} data-notranslate>
             {entries.map((e) => (
               <li key={e.rel}>
-                <button type="button" aria-current={open?.rel === e.rel} className={cn("flex w-full flex-col rounded-xl px-3 py-2 text-left hover:bg-accent", open?.rel === e.rel && "bg-accent")} onClick={() => setOpen(open?.rel === e.rel ? undefined : e)}>
-                  <span className="flex items-center gap-2">
+                <button type="button" aria-current={open?.rel === e.rel} className={cn("flex w-full min-w-0 flex-col rounded-xl px-3 py-2 text-left hover:bg-accent", open?.rel === e.rel && "bg-accent")} onClick={() => setOpen(open?.rel === e.rel ? undefined : e)}>
+                  <span className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 truncate font-medium">{e.name}</span>
                     {e.kind && <span className="flex-none rounded-full bg-secondary px-1.5 text-[11px] text-muted-foreground">{e.kind}</span>}
                     {e.source && e.source !== "cube" && <span className="flex-none text-[11px] text-muted-foreground">{PROGRAM[e.source] ?? e.source}</span>}
                   </span>
-                  {!open && e.description && <span className="truncate text-[13px] text-muted-foreground">{e.description}</span>}
+                  {!open && e.description && <span className="block w-full truncate text-[13px] text-muted-foreground">{e.description}</span>}
                 </button>
               </li>
             ))}

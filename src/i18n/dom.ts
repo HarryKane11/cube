@@ -1,4 +1,5 @@
 import { EXACT, PATTERNS } from "./ko";
+import { koNames } from "@/agents/types";
 import type { Lang } from "./index";
 
 /**
@@ -52,6 +53,9 @@ export function translate(text: string): string | null {
     const done = parts.map((p) => translate(p));
     if (done.some((d) => d !== null)) out = done.map((d, i) => d ?? parts[i]).join(" · ");
   }
+  // The built-in cubes have Korean names: alone ("Writer") or inside a sentence Cube wrote ("Writer가 확인을 기다려요").
+  const named = koNames(out ?? core);
+  if (out !== null || named !== core) out = named;
   if (cache.size < 5000) cache.set(core, out);
   return out === null ? null : place(text, core, out);
 }

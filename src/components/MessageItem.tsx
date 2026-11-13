@@ -1,49 +1,69 @@
 import { Lottie } from "lottie-react";
-import { useState } from "react";
+import { Suspense, lazy, useMemo, useState } from "react";
 import typing from "@/assets/typing.json";
-import { splitNotes, splitPlan, type PlanStep } from "@/agents/notes";
+import { routerLine, routerSaid, splitNotes, splitPlan, type PlanStep } from "@/agents/notes";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { answerAsk, approvePlan, rescan, restoreTo } from "@/agents/orchestrator";
 import { branchDiff, dropBranch, mergeBranch } from "@/agents/trees";
 import { inTauri } from "@/agents/runner";
 import type { Question } from "@/agents/permissions";
-import { AGENTS, ORCH, ROUTER, agentById, authorName, type Status } from "@/agents/types";
+import { AGENTS, ORCH, ROUTER, agentById, nameIn, type Status, type Todo } from "@/agents/types";
 import { Face, PersonAvatar, RichText, timeOf } from "@/components/bits";
 import { CheckIcon } from "@/components/icons";
 import { CopyIcon, PencilIcon, PinIcon, RewindIcon, ThreadIcon, TrashIcon } from "@/components/icons";
 import { kindOf } from "@/lib/files";
+import { listed, timeline } from "@/lib/timeline";
+import { hasUi, splitUi } from "@/lib/uiBlocks";
+import { CollapsibleContent } from "@/components/ui/collapsible";
 import { Steps, StepsContent, StepsItem, StepsTrigger } from "@/components/ui/steps";
+import { EmojiGlyph, EmojiPicker } from "@/components/Emoji";
+import { Glyph } from "@/components/Glyph";
 import { HelperCard } from "@/components/HelperCard";
 import { RightClick } from "@/components/ui/context-menu";
 import { Rolling } from "@/components/Rolling";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Cube, CubeStill } from "@/cube/Cube";
 import { cn } from "@/lib/utils";
-import { useCube, type Ask, type Msg } from "@/state/store";
+import { useCube, type Act, type Ask, type Msg } from "@/state/store";
 
 const QUICK = ["👍", "✅", "👀", "❤️"];
 
+/**
+ * The reactions on a message, as in Slack: each emoji with how many left it. Pressing one adds
+ * the person's own to it (the count goes up) or takes it back; resting on it says who reacted.
+ * Beside them is the way to add another.
+ */
 function Reactions({ msg }: { msg: Msg }) {
   const react = useCube((s) => s.react);
+  const lang = useCube((s) => s.settings.lang);
   const entries = Object.entries(msg.reactions ?? {});
   if (!entries.length) return null;
+  const nameOf = (id: string): string => {
+    if (id === "you") return lang === "ko" ? "나" : "You";
+    const agent = agentById(id);
+    return agent ? nameIn(agent, lang) : id;
+  };
+  const chip = "flex h-6 items-center gap-1 rounded-full border px-2 text-xs font-medium tabular-nums";
   return (
-    <div className="flex flex-none flex-wrap gap-1">
-      {entries.map(([emoji, who]) => (
-        <button
-          type="button"
-          key={emoji}
-          aria-pressed={who.includes("you")}
-          title={who.map(authorName).join(", ")}
-          className={cn(
-            "flex h-[22px] items-center gap-1 rounded-full bg-secondary px-2 text-xs tabular-nums text-foreground",
-            who.includes("you") && "bg-primary/10 text-primary",
-          )}
-          onClick={() => react(msg.id, emoji, "you")}
-        >
-          <span>{emoji}</span>
-          {who.length}
-        </button>
-      ))}
+    <div className="flex flex-none flex-wrap items-center gap-1">
+      {entries.map(([emoji, who]) => {
+        const mine = who.includes("you");
+        return (
+          <Tooltip key={emoji}>
+            <TooltipTrigger
+              render={<button type="button" aria-pressed={mine} aria-label={`${emoji}, ${who.length}`} className={cn(chip, mine ? "border-primary/60 bg-primary/10 text-primary" : "border-transparent bg-secondary text-foreground hover:border-border")} onClick={() => react(msg.id, emoji, "you")} />}
+            >
+              <EmojiGlyph code={emoji} size={15} />
+              <span data-notranslate>{who.length}</span>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="flex-col gap-1 py-2 text-center">
+              <EmojiGlyph code={emoji} size={28} />
+              <span data-notranslate>{who.map(nameOf).join(", ")}</span>
+            </TooltipContent>
+          </Tooltip>
+        );
+      })}
+      <EmojiPicker beside className="flex h-6 items-center rounded-full border border-transparent bg-secondary px-1.5 text-muted-foreground hover:border-border hover:text-foreground" onPick={(code) => react(msg.id, code, "you")} />
     </div>
   );
 }
@@ -72,7 +92,7 @@ function Sent({ msg }: { msg: Msg }) {
               </button>
             ) : (
               <button type="button" className="flex h-8 items-center gap-1.5 rounded-full border bg-background px-3 text-[13px] font-medium hover:bg-accent" onClick={() => open(rel)}>
-                <span className={`glyph glyph-sm glyph-${kindOf(rel)}`} aria-hidden="true"><i /></span>
+                <Glyph kind={kindOf(rel)} name={rel} small />
                 <span className="max-w-[200px] truncate">{name}</span>
               </button>
             )}
@@ -83,20 +103,25 @@ function Sent({ msg }: { msg: Msg }) {
   );
 }
 
-function Toolbar({ msg, canThread, onRestore, onEdit }: { msg: Msg; canThread: boolean; onRestore?: () => void; onEdit?: () => void }) {
+function Toolbar({ msg, mine, canThread, onRestore, onEdit }: { msg: Msg; mine: boolean; canThread: boolean; onRestore?: () => void; onEdit?: () => void }) {
   const react = useCube((s) => s.react);
   const patchMsg = useCube((s) => s.patchMsg);
   const openThread = useCube((s) => s.openThread);
   const deleteMsg = useCube((s) => s.deleteMsg);
   const tool = "flex size-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground";
+  // The bar shows only while the pointer is on the message. With the emoji up the pointer is on
+  // them, not on the message: the bar stays, or the emoji would have nothing to stand by.
+  const [picking, setPicking] = useState(false);
   return (
     // Every message reads from one left edge, so the bar always sits at the right, clear of the text.
-    <div className="absolute -top-3 right-4 z-10 hidden items-center rounded-xl border bg-popover p-0.5 shadow-sm group-hover:flex group-focus-within:flex">
+    // The person's own message has its time at that corner: there the bar sits above it, not on it.
+    <div className={cn("absolute right-4 z-10 items-center rounded-xl border bg-popover p-0.5 shadow-sm group-hover:flex group-focus-within:flex", picking ? "flex" : "hidden", mine ? "-top-7" : "-top-3")}>
       {QUICK.map((e) => (
         <button type="button" key={e} className={tool} aria-label={`React with ${e}`} onClick={() => react(msg.id, e, "you")}>
           <span className="text-[15px] leading-none">{e}</span>
         </button>
       ))}
+      <EmojiPicker className={tool} onOpenChange={setPicking} onPick={(code) => react(msg.id, code, "you")} />
       <span className="mx-0.5 h-4 w-px bg-border" />
       {canThread && (
         <button type="button" className={tool} aria-label="Reply in thread" title="Reply in thread" onClick={() => openThread(msg.parentId ?? msg.id)}>
@@ -177,11 +202,12 @@ function BranchCard({ msg, name }: { msg: Msg; name: string }) {
 function PlanCard({ msg, steps }: { msg: Msg; steps: PlanStep[] }) {
   const now = msg.stepNow ?? steps[0]?.n;
   const over = Boolean(msg.stepsDone);
-  // A plan whose run ended without finishing (stopped, or it failed) is no longer moving.
-  const moving = !over && !msg.stopped && !msg.error;
+  // A plan that ended before its last step, or whose run stopped or failed, is no longer moving: its steps stay as far as they got.
+  const ended = !over && Boolean(msg.stepsEnded);
+  const moving = !over && !ended && !msg.stopped && !msg.error;
   return (
     <section className="flex w-full max-w-[520px] flex-col gap-1.5 rounded-[18px] border bg-background p-3" aria-label="Plan">
-      <p className="text-xs font-semibold text-muted-foreground">{over ? "Plan · done" : `Plan · ${steps.length} ${steps.length === 1 ? "step" : "steps"}`}</p>
+      <p className="text-xs font-semibold text-muted-foreground">{over ? "Plan · done" : ended ? "Plan · ended early" : `Plan · ${steps.length} ${steps.length === 1 ? "step" : "steps"}`}</p>
       <ol className="flex flex-col gap-1">
         {steps.map((s) => {
           const done = over || s.n < now;
@@ -198,6 +224,83 @@ function PlanCard({ msg, steps }: { msg: Msg; steps: PlanStep[] }) {
         })}
       </ol>
     </section>
+  );
+}
+
+const IntelligentBlock = lazy(() => import("@/components/intelligent/IntelligentBlock"));
+
+/**
+ * What a cube said, with any view it put in its reply drawn where it stands. A reply without a
+ * view (nearly all of them) is plain rich text, and nothing more is loaded for it.
+ */
+function ReplyText({ text, msg, live }: { text: string; msg: Msg; live: boolean }) {
+  const rich = useCube((s) => s.settings.richUi !== false);
+  if (!rich || msg.author === "you" || !hasUi(text)) return <RichText text={text} />;
+  return (
+    <>
+      {splitUi(text).map((part, i) => part.ui ? (
+        <Suspense key={i} fallback={null}>
+          <IntelligentBlock code={part.body} streaming={live && Boolean(part.open)} convId={msg.convId} parentId={msg.parentId} />
+        </Suspense>
+      ) : <RichText key={i} text={part.body} />)}
+    </>
+  );
+}
+
+/**
+ * The steps an agent took at one point of its reply, as one line that opens: while they are
+ * the latest thing it did, the line shows the step it is on.
+ */
+function ActGroup({ acts, live }: { acts: Act[]; live: boolean }) {
+  const shown = listed(acts);
+  // While it works the line says what it is doing this moment, thinking included. Afterwards, what it did.
+  const last = live ? acts[acts.length - 1] : shown[shown.length - 1];
+  return (
+    <Steps defaultOpen={false} className="w-full max-w-[640px] px-1">
+      <StepsTrigger className="w-auto max-w-full gap-1 text-[13px] [&_svg]:size-3.5 [&_svg]:flex-none">
+        <span className="flex min-w-0 items-center gap-1.5">
+          {live ? <Rolling className="min-w-0" text={last.label} /> : <span className="truncate">{last.label}</span>}
+          {shown.length > 1 && <span className="flex-none rounded-full bg-secondary px-1.5 text-[11px] font-semibold tabular-nums" data-notranslate>{shown.length}</span>}
+        </span>
+      </StepsTrigger>
+      <StepsContent className="text-left">
+        {shown.map((a, i) => <StepsItem className="text-xs" key={i}>{a.label}</StepsItem>)}
+      </StepsContent>
+    </Steps>
+  );
+}
+
+/**
+ * The agent's own list of what it is doing, kept up as it goes: open while it works, one line
+ * that opens once it is done.
+ */
+function TodoCard({ items, moving }: { items: Todo[]; moving: boolean }) {
+  const done = items.filter((t) => t.state === "done").length;
+  return (
+    <Steps defaultOpen={moving} className="w-full max-w-[520px] rounded-[14px] border bg-background px-3 py-2">
+      <StepsTrigger className="w-full justify-between gap-2 text-xs font-semibold [&_svg]:size-3.5">
+        <span className="flex items-center gap-1.5">
+          <span>Steps</span>
+          <span className="tabular-nums" data-notranslate>{done}/{items.length}</span>
+        </span>
+      </StepsTrigger>
+      <CollapsibleContent className="overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
+        <ol className="mt-2 flex flex-col gap-1">
+          {items.map((t, i) => {
+            const current = t.state === "doing";
+            return (
+              <li key={i} className={cn("flex items-start gap-2 text-[13px]", t.state === "pending" && "text-muted-foreground")} aria-current={current ? "step" : undefined}>
+                <span className={cn("mt-0.5 flex size-4 flex-none items-center justify-center rounded-full border", t.state === "done" ? "border-primary bg-primary text-primary-foreground" : current ? "border-primary" : "border-border")}>
+                  {t.state === "done" && <CheckIcon width={10} height={10} strokeWidth={3} />}
+                  {current && <span className={cn("size-1.5 rounded-full bg-primary", moving && "animate-pulse")} />}
+                </span>
+                <span className={cn("min-w-0 flex-1", t.state === "done" && "text-muted-foreground line-through decoration-muted-foreground/40", current && "font-medium")} data-notranslate>{t.text}</span>
+              </li>
+            );
+          })}
+        </ol>
+      </CollapsibleContent>
+    </Steps>
   );
 }
 
@@ -335,15 +438,23 @@ export function MessageItem({ msg, compact, inPanel, replies }: Props) {
   const status = useCube((s) => s.live[msg.author]?.status ?? "idle") as Status;
   const openProfile = useCube((s) => s.openProfile);
   // A `NOTE:` line is a proposal for the person to review, never part of the bubble, even mid-stream.
-  const said = mine ? msg.text : splitNotes(msg.text).text;
+  const noted = mine ? msg.text : splitNotes(msg.text).text;
+  // The Router opens its line with a word that tells Cube what kind of line it is. It is not for the reader.
+  const routed = agent?.id === ROUTER ? routerLine(noted) : undefined;
+  // A line in which it only passes the request on is never shown: who took it is seen from who answers.
+  // What it answers itself is shown as any cube's reply, under the name Cube. Until it is clear which
+  // of the two it is writing, only that it is at work is shown.
+  const passing = Boolean(routed) && !msg.error && !msg.asks?.length && (msg.streaming ? routed?.mark === "pass" : routerSaid(msg.text) !== "answer");
+  const said = routed ? (msg.streaming && routed.mark !== "answer" ? "" : routed.text) : noted;
   // A plan still being written is already taken out of the text, so it never flashes as raw lines.
   const drafted = agent?.id === ORCH && !msg.steps ? splitPlan(said) : undefined;
   const text = drafted?.text ?? said;
   const steps = msg.steps ?? drafted?.steps ?? [];
-  // The Router's line is a note about where a request went, not a reply: it is shown small.
-  const slim = agent?.id === ROUTER && !msg.error;
   const size = compact ? 26 : 32;
   const lastAct = msg.acts?.[msg.acts.length - 1];
+  // The steps of a run go where they happened in the reply. That needs the text as it was
+  // written: a line Cube took off its front (the Router's mark, a plan) moves every place.
+  const parts = useMemo(() => (agent && !routed && msg.acts?.length && msg.text.startsWith(text) ? timeline(text, msg.acts) : null), [agent, routed, msg.acts, msg.text, text]);
   // Only a message that just arrived slides in. History is drawn in place, and the slide never
   // hides the text: a paused animation (window in the background) must not leave it invisible.
   const [fresh] = useState(() => Date.now() - msg.ts < 1500);
@@ -377,9 +488,10 @@ export function MessageItem({ msg, compact, inPanel, replies }: Props) {
   const hasSteps = !msg.streaming && Boolean(msg.acts?.length);
   const hasFoot = hasSteps || Boolean(replies?.length) || Object.keys(msg.reactions ?? {}).length > 0 || Boolean(agent && (msg.noted || msg.decided));
 
+  if (passing) return null;
   return (
       <RightClick items={menu}>
-      <div data-mid={msg.id} className={cn("group relative flex items-start gap-2 rounded-xl px-4 py-0.5", fresh && "msg-in", mine && "flex-row-reverse", compact && !mine && "pl-12")}>
+      <div data-mid={msg.id} className={cn("group relative flex items-start gap-2 rounded-xl px-4 py-0.5 hover:bg-foreground/[0.035]", fresh && "msg-in", mine && "flex-row-reverse", compact && !mine && "pl-12")}>
         {msg.from && (msg.from.agent ? (
           // A teammate's cube is drawn as the cube it is, with its owner on the corner, so it is never taken for one of this person's own.
           <span className="relative flex-none" style={{ width: size, height: size }} title={msg.from.name} aria-hidden="true">
@@ -397,10 +509,10 @@ export function MessageItem({ msg, compact, inPanel, replies }: Props) {
           <div className="flex items-baseline gap-1.5 px-1 text-xs text-muted-foreground">
             {!mine && (msg.from
               ? <span className="font-semibold text-foreground" data-notranslate title={`Signed by ${msg.from.pubkey.slice(0, 12)}…`}>{msg.from.agent ? (lang === "ko" ? `${msg.from.name}의 ${msg.from.agent}` : `${msg.from.name}'s ${msg.from.agent}`) : msg.from.name}</span>
-              : <span className="font-semibold text-foreground">{agent?.name ?? msg.author}</span>)}
+              : <span className="font-semibold text-foreground">{agent ? nameIn(agent, lang) : msg.author}</span>)}
             {msg.from && <span>{msg.from.agent ? "teammate's cube" : "teammate"}</span>}
             {!msg.from && !mine && agent && sharedHere && <span>your cube</span>}
-            {msg.auto && <span>picked this up</span>}
+            {msg.auto && agent?.id !== ROUTER && <span>picked this up</span>}
             {msg.stepped && <span className="font-semibold text-primary">You stepped in</span>}
             <time dateTime={new Date(msg.ts).toISOString()}>{timeOf(msg.ts)}</time>
             {msg.stopped && <span>stopped</span>}
@@ -410,7 +522,9 @@ export function MessageItem({ msg, compact, inPanel, replies }: Props) {
             {msg.pinned && <span className="flex items-center gap-0.5 font-semibold text-primary"><PinIcon width={11} height={11} /> pinned</span>}
           </div>
 
-          {msg.streaming && lastAct && <Rolling className="px-1 text-[13px]" text={lastAct.label} />}
+          {msg.streaming && lastAct && !parts && <Rolling className="px-1 text-[13px]" text={lastAct.label} />}
+
+          {agent && Boolean(msg.todo?.length) && <TodoCard key={msg.streaming ? "live" : "done"} items={msg.todo!} moving={Boolean(msg.streaming)} />}
 
           {editing !== undefined ? (
             <form className="flex w-[min(460px,60vw)] flex-col gap-1.5 rounded-[18px] border bg-background p-2" onSubmit={(e) => { e.preventDefault(); saveEdit(); }}>
@@ -432,18 +546,33 @@ export function MessageItem({ msg, compact, inPanel, replies }: Props) {
                 <span className="text-xs text-muted-foreground">Cubes read the new text from their next turn on.</span>
               </div>
             </form>
+          ) : parts ? (
+            // What it said and what it did, in the order they happened.
+            <>
+              {parts.map((part, i) => {
+                const lastPart = i === parts.length - 1;
+                // Thinking with nothing done at that point is worth a line only while it is going on.
+                if (part.kind === "acts" && !(msg.streaming && lastPart) && part.acts.every((a) => a.kind === "think")) return null;
+                return part.kind === "acts" ? (
+                  <ActGroup key={i} acts={part.acts} live={Boolean(msg.streaming) && lastPart} />
+                ) : (
+                  <div key={i} className={cn("selectable chat-text px-1 [overflow-wrap:anywhere]", msg.aside && "ml-1 border-l-2 border-dashed pl-3", msg.streaming && lastPart && "caret")}>
+                    <ReplyText text={part.text} msg={msg} live={Boolean(msg.streaming) && lastPart} />
+                  </div>
+                );
+              })}
+            </>
           ) : (text || (msg.streaming && !msg.asks?.some((a) => a.state === "waiting"))) && (
             <div
               className={cn(
-                "selectable [overflow-wrap:anywhere]",
-                !slim && "chat-text",
-                slim ? "px-1 text-[13px] text-muted-foreground" : mine ? "rounded-[18px] bg-muted px-3.5 py-2" : "px-1",
+                "selectable chat-text [overflow-wrap:anywhere]",
+                mine ? "rounded-[18px] bg-muted px-3.5 py-2" : "px-1",
                 // Something said on the side changes no files: it is set apart with a dashed line, not a color.
                 msg.aside && (mine ? "border border-dashed bg-transparent" : "ml-1 border-l-2 border-dashed pl-3"),
                 msg.streaming && text && "caret",
               )}
             >
-              {text ? <RichText text={text} /> : <Lottie src={typing} loop autoplay className="h-5 w-9" aria-label="Working" />}
+              {text ? <ReplyText text={text} msg={msg} live={Boolean(msg.streaming)} /> : <Lottie src={typing} loop autoplay className="h-5 w-9" aria-label="Working" />}
             </div>
           )}
 
@@ -507,15 +636,19 @@ export function MessageItem({ msg, compact, inPanel, replies }: Props) {
               )}
               <Reactions msg={msg} />
               {replies && <ThreadSummary root={msg} replies={replies} />}
-              {hasSteps && (
+              {hasSteps && parts && (msg.took || msg.usage?.cost) ? (
+                // The steps are in the reply already, each where it happened: only what the run took is left to say.
+                <span className="flex-none" data-notranslate>{[msg.took ? spanOf(msg.took) : "", msg.usage?.cost ? "$" + msg.usage.cost.toFixed(msg.usage.cost < 0.1 ? 3 : 2) : ""].filter(Boolean).join(" · ")}</span>
+              ) : null}
+              {hasSteps && !parts && (
                 // The row's own line holds only the count and the time. The steps, and what they cost, open below it.
                 <Steps defaultOpen={false} className="contents">
                   <StepsTrigger className="w-auto flex-none gap-0.5 text-xs [&_svg]:size-3.5">
-                    {msg.acts!.length === 1 ? "1 step" : `${msg.acts!.length} steps`}
+                    {listed(msg.acts!).length === 1 ? "1 step" : `${listed(msg.acts!).length} steps`}
                     {msg.took ? ` · ${spanOf(msg.took)}` : ""}
                   </StepsTrigger>
                   <StepsContent className="basis-full text-left">
-                    {msg.acts!.map((a, i) => <StepsItem className="text-xs" key={i}>{a.label}</StepsItem>)}
+                    {listed(msg.acts!).map((a, i) => <StepsItem className="text-xs" key={i}>{a.label}</StepsItem>)}
                     {msg.usage?.cost ? <StepsItem className="text-xs">{`Cost · $${msg.usage.cost.toFixed(msg.usage.cost < 0.1 ? 3 : 2)}`}</StepsItem> : null}
                   </StepsContent>
                 </Steps>
@@ -523,7 +656,7 @@ export function MessageItem({ msg, compact, inPanel, replies }: Props) {
             </div>
           )}
         </div>
-        <Toolbar msg={msg} canThread={!inPanel} onRestore={mine && msg.checkpoint ? () => setRestoring("ask") : undefined} onEdit={mine && !msg.streaming ? () => setEditing(msg.text) : undefined} />
+        <Toolbar msg={msg} mine={mine} canThread={!inPanel} onRestore={mine && msg.checkpoint ? () => setRestoring("ask") : undefined} onEdit={mine && !msg.streaming ? () => setEditing(msg.text) : undefined} />
       </div>
       </RightClick>
   );

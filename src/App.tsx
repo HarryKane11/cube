@@ -116,7 +116,8 @@ export default function App() {
   const sidebarW = useCube((s) => s.settings.sidebarW);
   const chatW = useCube((s) => s.settings.chatW);
   const setSetting = useCube((s) => s.setSetting);
-  const side = wide ? sidebarW : 60;
+  // Hidden, the sidebar leaves only the margin the panels have on their other sides.
+  const side = wide ? sidebarW : 10;
 
   return (
     <div className="flex h-full flex-col">
@@ -129,7 +130,8 @@ export default function App() {
         <div className="min-h-0 flex-1"><Onboarding /></div>
       ) : (
         <div
-          className="relative grid min-h-0 flex-1 py-2.5 pr-2.5"
+          // With the sidebar hidden the panels start below the strip the window's own buttons and the one that brings the sidebar back sit in.
+          className={wide ? "relative grid min-h-0 flex-1 py-2.5 pr-2.5" : "relative grid min-h-0 flex-1 pb-2.5 pr-2.5 pt-10"}
           // The conversation keeps the width the person gave it, but never squeezes what is beside it out of sight.
           style={{ gridTemplateColumns: pane ? `${side}px minmax(320px, min(${chatW}px, calc(100% - ${side}px - 360px))) minmax(0, 1fr)` : `${side}px minmax(0, 1fr)` }}
         >

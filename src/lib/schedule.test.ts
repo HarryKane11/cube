@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Msg } from "../state/store";
-import { due, nextRun, repeatOf, type Schedule } from "./schedule";
+import { due, nextRun, repeatOf, suggestSchedules, type Schedule } from "./schedule";
 import { clashing, missedSince, statsFor } from "./stats";
 
 const base: Schedule = { id: "s", convId: "general", text: "Brief me", time: "09:00", days: [1, 2, 3, 4, 5], on: true };
@@ -24,6 +24,20 @@ describe("schedules", () => {
     expect(nextRun({ ...base, last: "2026-11-13" }, at(10, 0, 13))).toBe("Monday at 09:00");
     expect(nextRun({ ...base, on: false }, at(8))).toBe("Off");
     expect([repeatOf(base), repeatOf({ ...base, days: [] }), repeatOf({ ...base, days: [0, 6] }), repeatOf({ ...base, days: [1, 3] })]).toEqual(["Weekdays", "Every day", "Weekends", "Mon, Wed"]);
+  });
+});
+
+describe("schedules Cube offers", () => {
+  it("come from the tools that are connected, one per kind", () => {
+    const offered = suggestSchedules(["Google Calendar", "google-calendar-2", "Linear", "figma"], "en");
+    expect(offered.map((s) => s.key)).toEqual(["calendar", "issues"]);
+    expect(offered[0]).toMatchObject({ time: "08:30", days: [1, 2, 3, 4, 5] });
+    expect(suggestSchedules([], "en")).toEqual([]);
+  });
+  it("are worded in the person's language and left out once scheduled", () => {
+    const [ko] = suggestSchedules(["gmail"], "ko");
+    expect(ko.text).toContain("메일");
+    expect(suggestSchedules(["gmail"], "ko", [{ ...base, text: ko.text }])).toEqual([]);
   });
 });
 

@@ -1,4 +1,5 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
+import { useStickToBottomContext } from "use-stick-to-bottom";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { inTauri } from "@/agents/runner";
 import { setSeparate, stopAgent, undoRestore } from "@/agents/orchestrator";
@@ -7,15 +8,16 @@ import { EngineLabel, Face } from "@/components/bits";
 import { ChannelPeople } from "@/components/ChannelPeople";
 import { refreshMembers } from "@/team";
 import { Composer } from "@/components/Composer";
-import { BranchIcon, CloseIcon, HashIcon, LockIcon, MoreIcon, OpenIcon, PinIcon, StageIcon, PeopleIcon } from "@/components/icons";
+import { BranchIcon, CloseIcon, HashIcon, LockIcon, MoreIcon, OpenIcon, PinIcon, StageIcon, PeopleIcon, ThreadIcon } from "@/components/icons";
 import { authorName } from "@/agents/types";
 import { MessageItem } from "@/components/MessageItem";
 import { ChatContainerContent, ChatContainerRoot } from "@/components/ui/chat-container";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ScrollButton } from "@/components/ui/scroll-button";
 import { Cube, CubeStill } from "@/cube/Cube";
+import { CubeMark } from "@/cube/CubeMark";
 import { cn } from "@/lib/utils";
-import { useActiveConv, useCube, useStageOpen, type Conv, type Msg } from "@/state/store";
+import { useActiveConv, useCube, useStageOpen, type Conv, type Msg, labelOf } from "@/state/store";
 
 function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
   const live = useCube((s) => s.live);
@@ -68,7 +70,11 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
             ? <Face pubkey={conv.person.pubkey} name={conv.name} size={26} />
             : conv.shared?.private
               ? <LockIcon className="flex-none text-muted-foreground" width={18} height={18} />
-              : <HashIcon className="flex-none text-muted-foreground" width={18} height={18} />}
+              : conv.cube
+                ? <CubeMark size={24} className="flex-none" />
+              : conv.chat
+                ? <ThreadIcon className="flex-none text-muted-foreground" width={18} height={18} />
+                : <HashIcon className="flex-none text-muted-foreground" width={18} height={18} />}
           <h1 className={title}>{conv.name}</h1>
         </div>
       )}
@@ -87,6 +93,10 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
           </button>
         )}
         {conv.person && <span className="truncate">Direct message. Your cubes answer here only when you name one with @.</span>}
+        {/* A chat in a folder of the person's own says which: what its cubes change is changed there. */}
+        {conv.workspace && <span className="truncate" title={conv.workspace}><span>Folder</span><span data-notranslate> · {conv.workspace.replace(/^\/Users\/[^/]+(?=\/|$)/, "~")}</span></span>}
+        {/* A chat that began from another program's session says where it came from. */}
+        {conv.imported && <span className="truncate" title={conv.imported.cwd}><span>{`From ${conv.imported.program}`}</span>{conv.imported.cwd ? <span data-notranslate> · {conv.imported.cwd.split("/").filter(Boolean).pop()}</span> : null}</span>}
         {problem && <span className="truncate text-destructive" role="alert" title={problem} data-notranslate>{problem}</span>}
       </div>
       {!dm && (
@@ -218,15 +228,35 @@ function Clashes({ convId }: { convId: string }) {
   );
 }
 
+/**
+ * The conversation follows what is new while the person is at its end, and stays where they are
+ * once they scroll up to read. Sending something is asking to see what comes back, so their own
+ * message takes the conversation to its end from wherever they were.
+ */
+function FollowOwn({ last }: { last?: Msg }) {
+  const { scrollToBottom } = useStickToBottomContext();
+  const seen = useRef(last?.id);
+  useEffect(() => {
+    if (last && last.id !== seen.current && last.author === "you") void scrollToBottom();
+    seen.current = last?.id;
+  }, [last?.id]);
+  return null;
+}
+
 function Empty({ conv }: { conv: Conv }) {
   const dm = conv.kind === "dm" ? agentById(conv.members[0]) : undefined;
   return (
     <div className="m-auto flex max-w-[320px] flex-col items-center gap-1.5 px-6 text-center">
       {dm && <Cube color={dm.color} status="idle" size={96} />}
-      <h2 className="font-heading text-[17px] font-bold tracking-[-0.02em]">{dm || conv.person ? `Just you and ${dm ? dm.name : conv.name}` : `This is the start of #${conv.name}`}</h2>
+      {conv.cube && <CubeMark size={72} className="mb-1" />}
+      <h2 className="font-heading text-[17px] font-bold tracking-[-0.02em]">{dm || conv.person ? `Just you and ${dm ? dm.name : conv.name}` : conv.cube ? "Just you and your whole team" : conv.chat ? conv.name : `This is the start of #${conv.name}`}</h2>
       <p className="text-muted-foreground">
         {dm
           ? `Anything you write here goes straight to ${dm.name}. What it makes shows up on the Stage.`
+          : conv.cube
+            ? "Say what you need, as you would to one person. Cube works out which of your cubes should take it, and they answer here."
+          : conv.imported
+            ? `Brought in from ${conv.imported.program}. Say what the team should do next.`
           : "Say what you need. Start with @ to pick who gets it. Agents here can hand work to each other and reply in threads."}
       </p>
     </div>
@@ -266,6 +296,7 @@ export function Conversation() {
       <Header conv={conv} paneOpen={paneOpen} />
       <Pinned pinned={pinned} />
       <ChatContainerRoot className="relative min-h-0 flex-1" key={conv.id}>
+        <FollowOwn last={roots[roots.length - 1]} />
         <ChatContainerContent className={cn("min-h-full gap-3.5 py-4", column)}>
           {roots.length === 0 && <Empty conv={conv} />}
           {/* Replies live in the thread: the message says that there are some, and the panel beside it shows them. */}
@@ -304,13 +335,14 @@ export function ThreadPanel() {
       <header className="flex min-h-[52px] items-center gap-2 border-b px-5 py-2" data-tauri-drag-region>
         <div className="min-w-0 flex-1">
           <h2 className="font-heading text-[17px] font-bold leading-tight tracking-[-0.02em]">Thread</h2>
-          <p className="text-xs text-muted-foreground">{conv.kind === "dm" ? conv.name : `#${conv.name}`}</p>
+          <p className="truncate text-xs text-muted-foreground">{labelOf(conv)}</p>
         </div>
         <button type="button" className="flex h-8 items-center gap-1.5 rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={() => openThread(undefined)}>
           <CloseIcon width={14} height={14} /> Back to Stage
         </button>
       </header>
       <ChatContainerRoot className="min-h-0 flex-1" key={root.id}>
+        <FollowOwn last={replies[replies.length - 1]} />
         <ChatContainerContent className="gap-3 py-4">
           <MessageItem msg={root} inPanel />
           <div className="mx-5 my-2 flex items-center gap-3 text-xs text-muted-foreground">

@@ -1,4 +1,4 @@
-import type { ActKind, Adapter, AgentKind, Ev, Parser, RunOpts } from "./types";
+import type { ActKind, Adapter, AgentKind, Ev, Parser, RunOpts, Todo } from "./types";
 
 const base = (p: unknown) => (typeof p === "string" ? p.split("/").pop() || p : "a file");
 const clip = (s: string, n = 64) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
@@ -68,10 +68,15 @@ function codexParser(prompt: string, sessionId: string | undefined, opts: RunOpt
         out.push(sessionId ? rpc(2, "thread/resume", { threadId: sessionId, ...trust, model: opts?.model ?? null }) : startThread());
       } else if (o.id === 2 && o.result?.thread?.id) {
         out.push({ t: "session", id: o.result.thread.id });
+        if (typeof o.result.model === "string" && o.result.model) out.push({ t: "model", model: o.result.model });
+        // How much of the plan is left is asked along the way: it costs nothing and needs no turn.
+        out.push({ t: "send", line: JSON.stringify({ id: LIMITS_ID, method: "account/rateLimits/read" }) });
         out.push(rpc(3, "turn/start", { threadId: o.result.thread.id, input: [{ type: "text", text: prompt, text_elements: [] }], effort: opts?.effort ?? null }));
       } else if (o.id === 2 && o.error && sessionId) {
         // The old thread is gone (cleared, or made by another version): start over rather than fail.
+        // The new thread knows nothing, so it is given what a cube starting afresh is given.
         sessionId = undefined;
+        if (opts?.freshPrompt) prompt = opts.freshPrompt;
         out.push(startThread());
       } else if ((o.id === 1 || o.id === 2 || o.id === 3) && o.error) {
         failed = true;
@@ -117,8 +122,14 @@ function codexParser(prompt: string, sessionId: string | undefined, opts: RunOpt
         } else if (it.type === "reasoning") {
           out.push({ t: "activity", kind: "think", label: "Thinking it through" });
         }
+      } else if (o.method === "turn/plan/updated" && Array.isArray(p.plan)) {
+        out.push({ t: "todo", items: todos(p.plan.map((s: any) => ({ text: s?.step, state: s?.status }))) });
       } else if (o.method === "item/completed" && it?.type === "mcpToolCall") {
         out.push(...shots(it.result?.content, `${it.server ?? "tool"} · ${it.tool ?? "result"}`));
+      } else if (o.id === LIMITS_ID) {
+        if (o.result) out.push({ t: "limits", program: "codex", how: "read", raw: o.result });
+      } else if (o.method === "account/rateLimits/updated" && p.rateLimits) {
+        out.push({ t: "limits", program: "codex", how: "event", raw: p });
       } else if (o.method === "thread/tokenUsage/updated" && p.tokenUsage?.total) {
         usage = { in: p.tokenUsage.total.inputTokens, out: p.tokenUsage.total.outputTokens };
       } else if (o.method === "error" && p.error) {
@@ -179,6 +190,17 @@ function shots(content: unknown, label: string): Ev[] {
     if (typeof data === "string" && data) out.push({ t: "shot", url: `data:${mime};base64,${data}`, label });
   }
   return out;
+}
+
+/** The number Cube gives its question to Codex about the plan's limits. */
+const LIMITS_ID = 9;
+
+/** An agent's list of what it is going to do, whichever words its program has for where each line stands. */
+export function todos(raw: { text: unknown; state: unknown }[]): Todo[] {
+  return raw
+    .filter((t) => typeof t.text === "string" && t.text.trim())
+    .slice(0, 30)
+    .map((t) => ({ text: clip(String(t.text).trim(), 160), state: /^(in_?progress|inProgress|doing)$/.test(String(t.state)) ? "doing" as const : /^(completed|done)$/.test(String(t.state)) ? "done" as const : "pending" as const }));
 }
 
 /** `mcp__server__tool` → what a person would call it. */
@@ -255,6 +277,9 @@ const claude: Adapter = {
         const out: Ev[] = [];
         if (o.type === "system" && o.subtype === "init" && o.session_id) {
           out.push({ t: "session", id: o.session_id });
+          if (typeof o.model === "string" && o.model) out.push({ t: "model", model: o.model });
+        } else if (o.type === "rate_limit_event" && o.rate_limit_info) {
+          out.push({ t: "limits", program: "claude", how: "event", raw: o.rate_limit_info });
         } else if (o.type === "stream_event" && o.event) {
           const e = o.event;
           if (e.type === "content_block_delta" && e.delta?.type === "text_delta" && e.delta.text) {
@@ -269,6 +294,11 @@ const claude: Adapter = {
           for (const block of o.message.content) {
             if (block?.type !== "tool_use" || seenTools.has(block.id)) continue;
             seenTools.add(block.id);
+            // Its list of what it is going to do is shown as a list, not as one more step.
+            if (block.name === "TodoWrite" && Array.isArray(block.input?.todos)) {
+              out.push({ t: "todo", items: todos(block.input.todos.map((t: any) => ({ text: t?.content, state: t?.status }))) });
+              continue;
+            }
             const tool = claudeTool(String(block.name), block.input);
             toolLabels.set(block.id, tool.label);
             out.push({ t: "activity", kind: tool.kind, label: tool.label, cmd: tool.cmd });

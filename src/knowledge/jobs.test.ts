@@ -97,6 +97,9 @@ describe("dueJob", () => {
   it("rewrites the wiki only after memory changed, and not more than every few hours", () => {
     expect(dueJob({ ...base, last: { memory: T - 20 * MIN }, memoryChangedAt: T - 20 * MIN })).toBe("wiki");
     expect(dueJob({ ...base, last: { memory: T - 20 * MIN, wiki: T - HOUR }, memoryChangedAt: T - 20 * MIN })).toBeNull();
+    // The person may have it rewritten more often, or less.
+    expect(dueJob({ ...base, wikiEvery: 1, last: { memory: T - 20 * MIN, wiki: T - 2 * HOUR }, memoryChangedAt: T - 20 * MIN })).toBe("wiki");
+    expect(dueJob({ ...base, wikiEvery: 24, last: { memory: T - 20 * MIN, wiki: T - 5 * HOUR }, memoryChangedAt: T - 20 * MIN })).toBeNull();
     // A memory run that changed nothing gives the wiki nothing to do.
     expect(dueJob({ ...base, last: { memory: T - 20 * MIN, wiki: T - 5 * HOUR }, memoryChangedAt: T - 9 * HOUR })).toBeNull();
   });

@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { logLine } from "../agents/runner";
 import { sidesOf, type Status } from "../agents/types";
+import { decorKey, decorOf } from "./decor";
 import { drawFace, exprFor, FACE_H, FACE_W, type Expr } from "./faces";
 
 /**
@@ -24,9 +25,29 @@ interface Grab { pivot: THREE.Group; layer: THREE.Mesh[] }
 /** Set from Settings: when true, cubes keep their layers still while they work. */
 export const motion = { calm: false };
 
+/** A figure (a path drawn in a square of 1 by 1) in white on nothing, as a picture to lay on stickers. `fill` is how much of the square it takes. */
+function figureTexture(path: string, size: number, fill: number): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const g = canvas.getContext("2d");
+  if (g) {
+    const side = size * fill;
+    g.translate((size - side) / 2, (size - side) / 2);
+    g.scale(side, side);
+    g.fillStyle = "rgba(255,255,255,0.95)";
+    g.fill(new Path2D(path));
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 function tint(hex: string, k: number): THREE.Color {
   return new THREE.Color(hex).lerp(new THREE.Color("#ffffff"), k);
 }
+
+/** The two states in which a cube is busy with a request. Between them it is one piece of work. */
+const atWork = (s: Status): boolean => s === "thinking" || s === "working";
 
 export class CubeInst {
   want: Status;
@@ -64,7 +85,10 @@ export class CubeInst {
     // the colors across the sides, and finishing solves them back. The team's cube is no
     // different, only its six sides are six colors. Any other color gets a plain cube in tints
     // of itself.
-    const sides = sidesOf(color);
+    // Cube's own cube may be dressed by the person: colors of its own, and a figure on its stickers.
+    const decor = decorOf(color);
+    const own = sidesOf(color);
+    const sides: typeof own = decor?.colors && own ? [decor.colors[0], decor.colors[0], decor.colors[2], decor.colors[2], decor.colors[1], decor.colors[1]] : own;
     const bodyColor = sides ? new THREE.Color(sides[0]).lerp(new THREE.Color("#141418"), 0.74) : new THREE.Color(color);
     const body = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: sides ? 0.55 : 0.85 });
     const geo = new RoundedBoxGeometry(1, 1, 1, 4, 0.16);
@@ -73,6 +97,32 @@ export class CubeInst {
       ? sides.map((hex) => new THREE.MeshStandardMaterial({ color: new THREE.Color(hex), roughness: 0.38 }))
       : [0.22, 0.22, 0.42, 0.42, 0.6, 0.6].map((k) => new THREE.MeshStandardMaterial({ color: tint(color, k), roughness: 0.3 }));
     this.owned.push(body, geo, sticker, front, back, right, left, top, bottom);
+    // The figure, when there is one: on every sticker of the cube, or once across the nine of its front.
+    let figure: THREE.PlaneGeometry | undefined;
+    let onEach: THREE.Material | undefined;
+    let across: THREE.Material[] | undefined;
+    if (decor?.symbol) {
+      figure = new THREE.PlaneGeometry(0.8, 0.8);
+      this.owned.push(figure);
+      const layer = (map: THREE.Texture) => {
+        const m = new THREE.MeshBasicMaterial({ map, transparent: true, depthWrite: false, side: THREE.DoubleSide });
+        this.owned.push(map, m);
+        return m;
+      };
+      if (decor.spread === "tiles") {
+        onEach = layer(figureTexture(decor.symbol, 160, 0.66));
+      } else {
+        const whole = figureTexture(decor.symbol, 480, 0.78);
+        this.owned.push(whole);
+        across = Array.from({ length: N * N }, (_, i) => {
+          const part = whole.clone();
+          part.repeat.set(1 / N, 1 / N);
+          part.offset.set((i % N) / N, Math.floor(i / N) / N);
+          part.needsUpdate = true;
+          return layer(part);
+        });
+      }
+    }
     const half = (N - 1) / 2;
     const o = 0.502;
     for (let x = 0; x < N; x++) for (let y = 0; y < N; y++) for (let z = 0; z < N; z++) {
@@ -83,13 +133,26 @@ export class CubeInst {
         s.position.set(px, py, pz);
         s.rotation.set(rx, ry, 0);
         c.add(s);
+        return s;
       };
-      if (z === N - 1) add(front, 0, 0, o, 0, 0);
-      if (z === 0) add(back, 0, 0, -o, 0, 0);
-      if (x === N - 1) add(right, o, 0, 0, 0, H);
-      if (x === 0) add(left, -o, 0, 0, 0, H);
-      if (y === N - 1) add(top, 0, o, 0, H, 0);
-      if (y === 0) add(bottom, 0, -o, 0, H, 0);
+      // A figure lies on a sticker as a thin layer of its own, turned as the sticker is, so it rides with the piece.
+      const mark = (on: THREE.Mesh, m: THREE.Material | undefined, outward?: 1) => {
+        if (!m || !figure) return;
+        // Which of a sticker's two flat sides looks out of the cube depends on how it was turned
+        // into place. A layer on each is simplest: the one that looks inward is hidden by the piece.
+        for (const z of outward ? [0.03] : [0.03, -0.03]) {
+          const d = new THREE.Mesh(figure, m);
+          d.position.set(0, 0, z);
+          on.add(d);
+        }
+      };
+      // Across the front, each of its nine stickers carries its own ninth of one large figure.
+      if (z === N - 1) mark(add(front, 0, 0, o, 0, 0), across ? across[y * N + x] : onEach, 1);
+      if (z === 0) mark(add(back, 0, 0, -o, 0, 0), onEach);
+      if (x === N - 1) mark(add(right, o, 0, 0, 0, H), onEach);
+      if (x === 0) mark(add(left, -o, 0, 0, 0, H), onEach);
+      if (y === N - 1) mark(add(top, 0, o, 0, H, 0), onEach);
+      if (y === 0) mark(add(bottom, 0, -o, 0, H, 0), onEach);
       this.root.add(c);
       this.cubies.push(c);
     }
@@ -153,6 +216,11 @@ export class CubeInst {
       const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
       v.g.pivot.rotation[v.m.axis] = v.m.dir * H * e;
       if (p >= 1) { this.release(v.g); this.mv = null; }
+    } else if (this.state !== this.want && atWork(this.state) && atWork(this.want)) {
+      // Thinking and doing are both the work. Going from one to the other (it happens at every
+      // step an agent takes) the cube stays as scrambled as it is: solving it here would look
+      // like finishing and starting over, again and again.
+      this.state = this.want;
     } else if (this.state !== this.want) {
       // Solve back to a clean cube before changing what it does. This is the moment the
       // scrambled colors snap back into place when work finishes.
@@ -170,25 +238,22 @@ export class CubeInst {
       this.wait -= dt;
     } else if (motion.calm) {
       // Calm mode: no twisting, only the face and a gentle sway show that it is working.
-    } else if (this.state === "working") {
+    } else if (atWork(this.state)) {
       // Stay scrambled for as long as the work lasts: keep turning layers, and undo a couple of
-      // turns now and then so the cube never gets more than a few moves away from solved.
+      // turns now and then so the cube never gets more than a few moves away from solved, and
+      // never all the way back to it. Thinking turns the layers slowly, doing turns them fast.
+      const slow = this.state === "thinking";
       if (this.phase === "scramble") {
         const m: Move = { axis: AXES[Math.floor(Math.random() * 3)], idx: Math.floor(Math.random() * N), dir: Math.random() < 0.5 ? 1 : -1 };
         this.hist.push(m);
-        this.start(m, 0.36);
+        this.start(m, slow ? 0.75 : 0.36);
         if (this.hist.length >= 7) this.phase = "solve";
       } else {
         const back = this.hist.pop();
-        if (back) this.start({ ...back, dir: -back.dir }, 0.3);
+        if (back) this.start({ ...back, dir: -back.dir }, slow ? 0.7 : 0.3);
         if (this.hist.length <= 4) this.phase = "scramble";
       }
-      this.wait = 0.22;
-    } else if (this.state === "thinking") {
-      const back = this.hist.pop();
-      if (back) this.start({ ...back, dir: -back.dir }, 0.9);
-      else { const m: Move = { axis: "y", idx: N - 1, dir: 1 }; this.hist.push(m); this.start(m, 0.9); }
-      this.wait = 1.5;
+      this.wait = slow ? 0.7 : 0.22;
     }
 
     let bx = 0.3, by = -0.44, bz = 0, y = 0;
@@ -287,7 +352,7 @@ class Engine {
   /** One still frame of a resting cube, as an image URL. Used for avatars that do not need to move. */
   still(color: string): string | null {
     // The picture depends on the face colors too, which the person can change.
-    const key = `${color}|${sidesOf(color)?.join() ?? ""}`;
+    const key = `${color}|${sidesOf(color)?.join() ?? ""}|${decorKey(color)}`;
     const cached = this.stills.get(key);
     if (cached) return cached;
     const r = this.ensure();

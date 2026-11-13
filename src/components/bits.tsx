@@ -1,12 +1,13 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { ComponentProps } from "react";
+import { useMemo, type ComponentProps } from "react";
 import claudeMark from "@/assets/brands/claude-code.svg";
 import codexMark from "@/assets/brands/codex-openai.svg";
 import hermesMark from "@/assets/brands/nousresearch-hermes.svg";
 import cubeMark from "@/assets/brands/cube-built-in.svg";
 import { inTauri } from "@/agents/runner";
-import { AGENTS, ENGINES, pickEngine, type AgentDef, type AgentKind } from "@/agents/types";
+import { AGENTS, ENGINES, KO_NAMES, koNames, pickEngine, type AgentDef, type AgentKind } from "@/agents/types";
 import { Markdown } from "@/components/ui/markdown";
+import { EMOJI_HREF, inlineEmoji, nameOfCode } from "@/lib/emoji";
 import { cn } from "@/lib/utils";
 import { useCube } from "@/state/store";
 
@@ -64,10 +65,16 @@ export function timeOf(ts: number): string {
 }
 
 /** Matches a mention of anyone on the team as it is now, sub-agents included. */
-const mention = () => new RegExp(`@(${[...AGENTS.map((a) => a.name), "You", ...useCube.getState().team.members.map((m) => m.name.replace(/\s+/g, "")).filter(Boolean)].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\p{L}\\p{N}])`, "giu");
+const mention = () => new RegExp(`@(${[...AGENTS.map((a) => a.name), ...Object.values(KO_NAMES), "You", ...useCube.getState().team.members.map((m) => m.name.replace(/\s+/g, "")).filter(Boolean)].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![A-Za-z0-9_])`, "giu");
+
+/** A name after an @. A built-in cube is shown by its name in the language Cube is in, whichever one it was written with. */
+function Mention({ children }: { children?: ComponentProps<"a">["children"] }) {
+  const lang = useCube((s) => s.settings.lang);
+  return <span className="at">{lang === "ko" && typeof children === "string" ? koNames(children) : children}</span>;
+}
 
 function Anchor({ href, children }: ComponentProps<"a">) {
-  if (href === "#mention") return <span className="at">{children}</span>;
+  if (href === "#mention") return <Mention>{children}</Mention>;
   return (
     <a
       href={href}
@@ -82,13 +89,24 @@ function Anchor({ href, children }: ComponentProps<"a">) {
   );
 }
 
-const COMPONENTS = { a: Anchor };
+/** A picture in a message. One that stands for an emoji of the workspace is drawn small, in the line, like a letter. */
+function Picture({ src, alt, node: _node, ...rest }: ComponentProps<"img"> & { node?: unknown }) {
+  const name = src === EMOJI_HREF && alt ? nameOfCode(alt) : undefined;
+  const picture = useCube((s) => (name ? s.emojis[name] : undefined));
+  if (name) return picture ? <img src={picture} alt={alt} title={alt} draggable={false} style={{ display: "inline-block", height: "1.45em", width: "1.45em", objectFit: "contain", verticalAlign: "-0.32em", margin: "0 0.05em" }} /> : <>{alt}</>;
+  return <img src={src} alt={alt} {...rest} />;
+}
+
+const COMPONENTS = { a: Anchor, img: Picture };
 
 /** Agent text is untrusted. react-markdown renders no raw HTML, and mentions become styled chips. */
 export function RichText({ text, className }: { text: string; className?: string }) {
+  // The workspace's own emoji, written `:name:` as in Slack, are drawn as their pictures.
+  const emojis = useCube((s) => s.emojis);
+  const shown = useMemo(() => inlineEmoji(text.replace(mention(), (m) => `[${m}](#mention)`), (name) => name in emojis), [text, emojis]);
   return (
     <Markdown className={cn("md", className)} components={COMPONENTS}>
-      {text.replace(mention(), (m) => `[${m}](#mention)`)}
+      {shown}
     </Markdown>
   );
 }

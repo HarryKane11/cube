@@ -189,6 +189,14 @@
 /* Brand marks are single-color SVGs, tinted with the current text color. */
 .brand-mark { display: inline-block; width: 14px; height: 14px; background: currentColor; -webkit-mask: var(--src) center / contain no-repeat; mask: var(--src) center / contain no-repeat; flex: none; }
 
+/* Home: what the person asked rises from the box into place as their words, and the cube's thought follows it. */
+.home-said { animation: home-said 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both; transform-origin: 100% 100%; }
+@keyframes home-said { from { transform: translateY(26px) scale(0.94); opacity: 0; } }
+.home-hmm { animation: home-hmm 0.3s ease-out 0.28s both; transform-origin: 0 50%; }
+@keyframes home-hmm { from { transform: scale(0.9); opacity: 0; } }
+.home-dot { animation: home-dot 1s ease-in-out infinite; }
+@keyframes home-dot { 0%, 60%, 100% { transform: translateY(0); opacity: 0.45; } 30% { transform: translateY(-3px); opacity: 1; } }
+
 /* New messages settle into place. Starts visible on purpose. */
 .msg-in { animation: msg-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1); }
 @keyframes msg-in { from { transform: translateY(8px); opacity: 0.55; } }

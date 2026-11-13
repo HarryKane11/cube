@@ -2,12 +2,19 @@ import { HEADLESS, runHeadless, type HeadlessEngine } from "@/agents/headless";
 import { splitNotes } from "@/agents/notes";
 import { getHarness, inTauri, knowledgeExport, knowledgeImport, knowledgeList, knowledgeRemove, libraryProgram, writeText, type KnowledgeListing } from "@/agents/runner";
 import { inventory } from "@/lib/library";
+import { subagentMd, type SubAgent } from "@/agents/subagents";
 import { ROUTER, authorName } from "@/agents/types";
 import { maskSecrets } from "@/lib/secrets";
 import { useCube } from "@/state/store";
-import { dueJob, finished, jobPrompt, summaryOf, transcript, type JobKind, type Line } from "./jobs";
+import { AGENTS } from "@/agents/types";
+import { nextRun, repeatOf } from "@/lib/schedule";
+import { labelOf } from "@/state/store";
+import { cubeMd, noteBody, workspaceFacts } from "./cubemd";
+import { dueJob, finished, jobPrompt, suggestionsOf, summaryOf, transcript, type JobKind, type Line } from "./jobs";
+import { libraryRead } from "@/agents/runner";
 
 export * from "./jobs";
+export * from "./cubemd";
 
 const store = () => useCube.getState();
 let stopCurrent: (() => void) | undefined;
@@ -31,7 +38,7 @@ export function linesSince(after: number): Line[] {
     if (!text) continue;
     lines.push({
       convId: conv.id,
-      where: conv.kind === "dm" ? `Direct message with ${conv.name}` : `#${conv.name}`,
+      where: conv.kind === "dm" ? `Direct message with ${conv.name}` : conv.chat ? `Chat "${conv.name}"` : `#${conv.name}`,
       who: m.author === "you" ? s.name || "The person" : authorName(m.author),
       text: maskSecrets(text.length > 6000 ? `${text.slice(0, 6000)}\n[…cut]` : text),
       ts: m.ts,
@@ -40,15 +47,101 @@ export function linesSince(after: number): Line[] {
   return lines;
 }
 
-/** What each agent program found on this computer has (skills, MCP servers, plugins), written out for the wiki job. */
-async function stock(): Promise<string> {
+/** What each agent program found on this computer has: its skills, MCP servers and plugins. */
+export async function programStock(): Promise<Parameters<typeof inventory>[0]> {
   const programs: Parameters<typeof inventory>[0] = {};
   for (const p of ["claude", "codex", "hermes"] as const) {
     if (!store().available[p]) continue;
     const [lib, harness] = await Promise.all([libraryProgram(p), getHarness(p)]).catch(() => [undefined, undefined] as const);
     if (lib && harness) programs[p] = { skills: lib.skills, mcp: harness.mcp, plugins: harness.plugins };
   }
-  return inventory(programs, new Date().toISOString().slice(0, 10));
+  return programs;
+}
+
+const today = () => new Date().toISOString().slice(0, 10);
+const PROGRAM_NAME = { claude: "Claude Code", codex: "Codex", hermes: "Hermes" } as const;
+
+/** The same, written out for the wiki job. */
+async function stock(): Promise<string> {
+  return inventory(await programStock(), today());
+}
+
+/** Who is in the workspace, as the app itself knows it: for the wiki job, which keeps ontology.md, and for CUBE.md. */
+function who() {
+  const s = store();
+  const me = s.team.info?.pubkey;
+  return {
+    person: s.name || "The person",
+    teammates: s.team.members.filter((m) => m.pubkey !== me).map((m) => m.name).filter(Boolean),
+    cubes: AGENTS.map((a) => ({ name: a.name, about: a.custom ? `${a.role}. Made here; its definition is in agents/${a.name}.md` : a.role })),
+  };
+}
+
+/** What Cube knows about the workspace, for the wiki job to work into ontology.md. */
+function facts(): string {
+  const s = store();
+  const now = new Date();
+  const convs = new Map(s.convs.map((c) => [c.id, c]));
+  return workspaceFacts({
+    today: today(),
+    ...who(),
+    channels: s.convs.filter((c) => c.kind === "channel" && !c.person && !c.chat).map((c) => ({ name: c.name, shared: Boolean(c.shared), cubes: c.members.map((id) => AGENTS.find((a) => a.id === id)?.name ?? id) })),
+    chats: s.convs.filter((c) => c.chat).sort((a, b) => b.createdAt - a.createdAt).map((c) => c.name),
+    schedules: s.schedules.filter((x) => x.on).map((x) => ({ text: maskSecrets(x.text), when: `${repeatOf(x)} at ${x.time} (next: ${nextRun(x, now)})`, where: convs.has(x.convId) ? labelOf(convs.get(x.convId)!) : "a conversation that is gone" })),
+  });
+}
+
+/**
+ * Keeps a sub-agent's definition as a file in the knowledge folder (agents/<Name>.md), and takes
+ * away the file of the name it had before. Nothing reads it back: the app's copy is what runs.
+ */
+export async function writeSubagentMd(sub: SubAgent, before?: string): Promise<void> {
+  if (!inTauri) return;
+  try {
+    const { dir } = await knowledgeList();
+    if (before && before !== sub.name) await knowledgeRemove([`agents/${before}.md`]);
+    await writeText(`${dir}/agents/${sub.name}.md`, maskSecrets(subagentMd(sub)));
+  } catch {
+    // The file is a convenience. A sub-agent works without it.
+  }
+}
+
+/** Takes away the file of a sub-agent that was deleted. */
+export async function dropSubagentMd(name: string): Promise<void> {
+  if (!inTauri) return;
+  await knowledgeRemove([`agents/${name}.md`]).catch(() => undefined);
+}
+
+/**
+ * Writes CUBE.md, the file a cube starts from, from what is on this computer right now. Called
+ * when the app opens and after every background job: those are the moments what it lists changes.
+ */
+export async function writeCubeMd(): Promise<void> {
+  if (!inTauri) return;
+  try {
+    const [listing, programs] = await Promise.all([knowledgeList(), programStock()]);
+    const newest = [...listing.memory].sort((a, b) => b.mtime - a.mtime);
+    const recent = (await Promise.all(newest.slice(0, 5).map((n) => libraryRead(n.path).then((text) => ({ name: n.name, text: maskSecrets(noteBody(text)) })).catch(() => null)))).filter((n): n is { name: string; text: string } => Boolean(n?.text));
+    const ontology = await libraryRead(`${listing.dir}/ontology.md`).then((t) => t.trim().length > 0).catch(() => false);
+    const item = (e: { name: string; description: string }) => ({ name: e.name, about: e.description });
+    const s = store();
+    const text = cubeMd({
+      today: today(),
+      dir: listing.dir,
+      ...who(),
+      conversations: s.convs.filter((c) => c.kind === "channel").map(labelOf),
+      programs: (["claude", "codex", "hermes"] as const).filter((p) => programs[p]).map((p) => ({ name: PROGRAM_NAME[p], mcp: programs[p]!.mcp, skills: programs[p]!.skills, plugins: programs[p]!.plugins })),
+      skills: listing.skills.map(item),
+      memory: newest.map(item),
+      recent,
+      wiki: listing.wiki.map(item),
+      ontology,
+    });
+    await writeText(`${listing.dir}/CUBE.md`, text);
+    store().setCubeMdAt(Date.now());
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 /** What is in the knowledge folder right now. */
@@ -92,7 +185,8 @@ export async function runJob(job: JobKind): Promise<void> {
     const inbox = `inbox/${job}-${started}.md`;
     if (fresh.count) await writeText(`${before.dir}/${inbox}`, fresh.text);
     // The wiki also takes in what each agent program has: they are the team's sub-agents.
-    if (job === "wiki") await writeText(`${before.dir}/${inbox}`, await stock());
+    // And what Cube itself knows about the workspace, which is what ontology.md starts from.
+    if (job === "wiki") await writeText(`${before.dir}/${inbox}`, `${await stock()}\n${facts()}`);
     // Notes brought in from other programs are worked in one batch per run, so no run has too much to read.
     const batch = job === "memory" ? before.batches[0] : undefined;
     if (job === "memory" && !fresh.count && !batch && !before.inbox.length) {
@@ -129,6 +223,8 @@ export async function runJob(job: JobKind): Promise<void> {
       ...(job !== "wiki" && fresh.count ? { cursor: { ...k.cursor, [job]: fresh.upTo } } : {}),
       ...(job === "memory" ? { imported: after.batches.length > worked.length, ...(changed ? { memoryChangedAt: Date.now() } : {}) } : {}),
     });
+    // What the wiki job thinks is worth doing next is offered on Home.
+    if (job === "wiki") store().addSuggestions(suggestionsOf(result.text));
     record(true, summary);
   } catch (e) {
     record(false, String(e));
@@ -136,6 +232,7 @@ export async function runJob(job: JobKind): Promise<void> {
     stopCurrent = undefined;
     store().setKnowledgeBusy(undefined);
     void listKnowledge().catch(() => undefined);
+    void writeCubeMd();
   }
 }
 
@@ -155,6 +252,6 @@ export function knowledgeTick(agentsBusy: boolean): void {
   const memory = linesSince(k.cursor.memory);
   const skills = linesSince(k.cursor.skills);
   const newest = s.messages.reduce((n, m) => Math.max(n, m.ts), 0);
-  const job = dueJob({ now: Date.now(), last: k.last, unread: { memory: memory.length, skills: skills.length }, newest, imported: k.imported, memoryChangedAt: k.memoryChangedAt });
+  const job = dueJob({ now: Date.now(), last: k.last, unread: { memory: memory.length, skills: skills.length }, newest, imported: k.imported, memoryChangedAt: k.memoryChangedAt, wikiEvery: k.wikiEvery });
   if (job) void runJob(job);
 }

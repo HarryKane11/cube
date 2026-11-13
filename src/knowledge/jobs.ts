@@ -67,6 +67,8 @@ The folder:
 - memory/imported/: notes brought in from other agent programs (Claude Code, Codex, Hermes), in batches. Source material; never edit it.
 - skills/<name>/SKILL.md: procedures agents follow. Front matter \`name\` and \`description\`, then the steps.
 - wiki/*.md: pages for the person to read. wiki/index.md links to all of them.
+- ontology.md: how the things this workspace deals with are connected. The wiki job keeps it; the other jobs leave it alone.
+- CUBE.md: an index Cube itself writes for the cubes. Never edit it.
 - inbox/: new material for this run.
 
 Rules for everything you write:
@@ -131,7 +133,29 @@ Your job now: the wiki. It is the one place that puts together what the whole te
 3. Keep one page on what the team can do, from the inventory: arranged by what the ability is for (writing documents, browsing, data, deployment, design and so on), not by program. Under each, name the skills, MCP servers and plugins that serve it and say which program has each, so that whoever hands out work can tell who to give it to. When several programs have the same skill, say so once. Leave out what nobody would ever need to choose between; do not copy descriptions.
 4. Every statement must come from memory or the inventory. Do not guess, and do not fill gaps. Where two notes disagree, say so on the page.
 5. Write prose and short lists under clear headings. Link pages to each other with relative links. End each page with "Last updated: ${o.today}".
-6. Rewrite wiki/index.md: every page, with one line on what it holds. Remove pages that nothing supports any more.`;
+6. Rewrite wiki/index.md: every page, with one line on what it holds. Remove pages that nothing supports any more.
+7. Keep ontology.md, at the top of this folder: how the things this workspace deals with are connected, so that a cube can find who works on what, which tool holds which data and what a word means here without reading everything. Its sources are the facts Cube wrote in inbox/ (source: workspace), the inventory (source: inventory) and the notes in memory/ (source: the note's file). Write it like this:
+
+# Ontology
+
+One short paragraph on what this file is and how to read it.
+
+## Entities
+- [type] Name: one line on what it is. Also called: other names it goes by.
+
+## Relations
+- Subject — relation → Object (source: workspace | inventory | memory/<note>.md; learned ${o.today})
+
+## Terms
+- word: what it means in this workspace (source: memory/<note>.md; learned ${o.today})
+
+   - Types are person, team, cube, project, channel, file, tool and term. Use one name per thing everywhere, the one the person uses.
+   - Relations say things like works on, owns, decided, uses, holds the data for, is part of, reports to, is discussed in. One relation per line, each with its source.
+   - You write and change only lines marked \`learned\`. A line the person marked \`confirmed\` in place of \`learned\` is theirs: never change or remove it, and where what you find disagrees with it, keep theirs and say so on the wiki page it concerns. Remove a learned line once nothing supports it any more.
+   - For data that lives in an outside tool (a calendar, mail, an issue tracker, a repository), record which tool holds it and how to find it there (a name, an ID, a link). Never copy its content in.
+   - Keep the file under 300 lines. Beyond that, keep the entities and relations a request is most likely to turn on, and leave the detail to the wiki pages.
+   Count what you add, change and remove in ontology.md in the three count lines.
+8. Last, before the three count lines: when memory and the wiki show something worth doing next for ${o.person} (a follow-up that was promised, a date that is near, something left open, a chore that comes round often enough to schedule, a connected tool that would save them work), write at most three lines that start with \`SUGGEST:\`, each one request ${o.person} could send to the team exactly as written, in one sentence. Suggest nothing that is already done or already scheduled, and nothing you would have to guess at. No such line is a fine outcome.`;
 }
 
 /** True when a job ended the way it was told to, with its three count lines. Without them it did not do the work. */
@@ -142,7 +166,7 @@ export function summaryOf(text: string): string {
   const count = (k: string) => text.match(new RegExp(`^\\s*${k}:\\s*(\\d+)`, "mi"))?.[1];
   const [added, updated, removed] = [count("ADDED"), count("UPDATED"), count("REMOVED")];
   const lines = text.trim().split("\n").map((l) => l.trim()).filter(Boolean);
-  const last = [...lines].reverse().find((l) => !/^(ADDED|UPDATED|REMOVED):/i.test(l)) ?? "";
+  const last = [...lines].reverse().find((l) => !/^(ADDED|UPDATED|REMOVED|SUGGEST):/i.test(l)) ?? "";
   const counts = added !== undefined || updated !== undefined || removed !== undefined ? `${added ?? 0} added, ${updated ?? 0} updated, ${removed ?? 0} removed. ` : "";
   return `${counts}${last.replace(/^[#>*\-\s]+/, "").slice(0, 240)}`.trim() || "Finished without a summary.";
 }
@@ -159,10 +183,15 @@ export interface Clock {
   imported: boolean;
   /** When memory last actually changed (a run that added, updated or removed something, or an import). */
   memoryChangedAt: number;
+  /** The fewest hours between two wiki runs, as the person set it. Three when they set nothing. */
+  wikiEvery?: number;
 }
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
+/** How often the wiki is rewritten at most, in hours, unless the person chose otherwise; and what they can choose. */
+export const WIKI_EVERY = 3;
+export const WIKI_CHOICES = [1, 3, 6, 12, 24];
 
 /**
  * Which job should run now when Cube keeps things up by itself, or null. Memory goes first, once
@@ -175,7 +204,17 @@ export function dueJob(c: Clock): JobKind | null {
   const memoryDue = c.imported || (quiet && (c.unread.memory >= 12 || (c.unread.memory > 0 && since("memory") > 6 * HOUR)));
   // Imports are worked in batch after batch; conversation waits at least ten minutes between runs.
   if (memoryDue && since("memory") > (c.imported ? MIN : 10 * MIN)) return "memory";
-  if (c.memoryChangedAt > (c.last.wiki ?? 0) && since("wiki") > 3 * HOUR) return "wiki";
+  if (c.memoryChangedAt > (c.last.wiki ?? 0) && since("wiki") > (c.wikiEvery || WIKI_EVERY) * HOUR) return "wiki";
   if (quiet && c.unread.skills >= 40 && since("skills") > 12 * HOUR) return "skills";
   return null;
+}
+
+/** What the wiki job offered as things to do next: its \`SUGGEST:\` lines, three at most, each a request that can be sent as it is. */
+export function suggestionsOf(text: string): string[] {
+  const found: string[] = [];
+  for (const m of text.matchAll(/^\s*`?SUGGEST:`?\s*(.+)$/gim)) {
+    const said = m[1].trim().replace(/^["“]|["”]$/g, "").slice(0, 300);
+    if (said && !found.includes(said)) found.push(said);
+  }
+  return found.slice(0, 3);
 }

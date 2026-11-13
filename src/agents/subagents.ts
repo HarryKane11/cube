@@ -1,3 +1,4 @@
+import { usesBlock } from "./setup";
 import type { AgentDef, Palette } from "./types";
 
 /**
@@ -16,6 +17,10 @@ export interface SubAgent {
   /** How it should go about its work, in the person's words. Given to the agent at the start of a conversation. */
   instructions: string;
   palette: Palette;
+  /** What its cube holds: an id from the catalog (src/cube/props), or "none". Picked when it is set up; the person can change it. */
+  prop?: string;
+  /** The connected tools (MCP servers) and skills picked for this role, by name. It is told to reach for them. */
+  uses?: { mcp: string[]; skills: string[] };
   /** Brought in from a teammate: who made it. */
   from?: { name: string; pubkey: string };
   /** Offered to the team: teammates can bring in a copy. */
@@ -33,6 +38,7 @@ export interface SharedAgent {
   brief: string;
   instructions: string;
   palette: Palette;
+  prop?: string;
 }
 
 export const NAME_RULE = /^\p{L}[\p{L}\p{N}]{1,19}$/u;
@@ -80,14 +86,15 @@ export function toDef(sub: SubAgent, color: string): AgentDef {
     palette: [color, sub.palette[1], sub.palette[2]],
     prefers: ["claude", "codex", "hermes", "api"],
     keywords: [],
-    instructions: sub.instructions.trim() || undefined,
+    instructions: [sub.instructions.trim(), usesBlock(sub.uses)].filter(Boolean).join("\n\n") || undefined,
+    prop: sub.prop,
     custom: true,
   };
 }
 
 /** What is published when a sub-agent is offered to the team. Nothing about where or how it runs here. */
 export function offer(sub: SubAgent): string {
-  return JSON.stringify({ agent: { id: sub.id, name: sub.name, role: sub.role, brief: sub.brief, instructions: sub.instructions, palette: sub.palette } });
+  return JSON.stringify({ agent: { id: sub.id, name: sub.name, role: sub.role, brief: sub.brief, instructions: sub.instructions, palette: sub.palette, prop: sub.prop } });
 }
 
 /**
@@ -106,12 +113,36 @@ export function readOffer(body: unknown, by: string, byName: string): SharedAgen
   const instructions = text(a.instructions ?? "", LIMITS.instructions);
   const palette = Array.isArray(a.palette) && a.palette.length === 3 && a.palette.every((c) => typeof c === "string" && HEX.test(c)) ? (a.palette as Palette) : null;
   if (!id || !name || !NAME_RULE.test(name) || role === null || !brief || instructions === null || !palette) return null;
-  return { key: `${by}:${id}`, by, byName, name, role, brief, instructions, palette };
+  // What its cube holds is only a look. One this app does not know is shown as nothing.
+  const prop = typeof a.prop === "string" && /^[a-z]{1,20}$/.test(a.prop) ? a.prop : undefined;
+  return { key: `${by}:${id}`, by, byName, name, role, brief, instructions, palette, prop };
 }
 
 /** A copy of a teammate's sub-agent as one of the person's own, under a name that is free here. */
 export function adopt(shared: SharedAgent, takenNames: string[], takenIds: string[]): SubAgent {
   let name = shared.name;
   for (let n = 2; nameProblem(name, takenNames); n++) name = `${shared.name.slice(0, 18)}${n}`;
-  return { id: newId(name, takenIds), name, role: shared.role, brief: shared.brief, instructions: shared.instructions, palette: shared.palette, from: { name: shared.byName, pubkey: shared.by } };
+  return { id: newId(name, takenIds), name, role: shared.role, brief: shared.brief, instructions: shared.instructions, palette: shared.palette, prop: shared.prop, from: { name: shared.byName, pubkey: shared.by } };
+}
+
+/**
+ * A sub-agent's definition as a file, kept in the workspace's knowledge folder (agents/<Name>.md)
+ * so that it can be read like the rest of what the workspace knows. Cube writes it from what is
+ * in the app; the app's copy is the one that counts.
+ */
+export function subagentMd(sub: SubAgent): string {
+  const one = (s: string) => s.replace(/\s+/g, " ").trim();
+  const head = [
+    "---",
+    `name: ${sub.name}`,
+    `role: ${one(sub.role) || "Sub-agent"}`,
+    `description: ${one(sub.brief)}`,
+    ...(sub.prop && sub.prop !== "none" ? [`prop: ${sub.prop}`] : []),
+    ...(sub.uses?.mcp.length ? [`mcp: [${sub.uses.mcp.join(", ")}]`] : []),
+    ...(sub.uses?.skills.length ? [`skills: [${sub.uses.skills.join(", ")}]`] : []),
+    ...(sub.from ? [`from: ${one(sub.from.name)}`] : []),
+    "---",
+  ];
+  const body = [`# ${sub.name}`, one(sub.brief), sub.instructions.trim() ? `## How it works\n\n${sub.instructions.trim()}` : "", usesBlock(sub.uses) ? `## Tools and skills\n\n${usesBlock(sub.uses)}` : ""];
+  return `${head.join("\n")}\n\n${body.filter(Boolean).join("\n\n")}\n\nWritten by Cube from the sub-agent as it is set up in the app. To change it, edit the sub-agent in Cube's Library.\n`;
 }

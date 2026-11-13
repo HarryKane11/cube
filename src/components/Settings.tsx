@@ -5,7 +5,9 @@ import { inTauri, keyDelete, keyList, keySet } from "@/agents/runner";
 import { MODES } from "@/agents/types";
 import { FONTS_EN, FONTS_KO, fontName } from "@/lib/fonts";
 import { UI_SCALES } from "@/lib/uiScale";
-import { BellIcon, BookIcon, CubeIcon, DataIcon, GearIcon, PeopleIcon, PlugIcon, UserIcon } from "@/components/icons";
+import { ClockIcon, BellIcon, BookIcon, CubeIcon, DataIcon, GearIcon, PeopleIcon, PlugIcon, UserIcon } from "@/components/icons";
+import { UsageSettings } from "@/components/UsageSettings";
+import { EmojiSettings } from "@/components/EmojiSettings";
 import { Face } from "@/components/bits";
 import { toAvatar } from "@/lib/avatar";
 import { setMyAvatar } from "@/team";
@@ -100,11 +102,12 @@ const THEMES: { v: SettingsShape["theme"]; label: string }[] = [
   { v: "dark", label: "Dark" },
 ];
 
-type Tab = "general" | "team" | "connections" | "knowledge" | "people" | "alerts" | "data";
+type Tab = "general" | "team" | "connections" | "usage" | "knowledge" | "people" | "alerts" | "data";
 const TABS: { id: Tab; name: string; icon: typeof GearIcon }[] = [
   { id: "general", name: "General", icon: UserIcon },
   { id: "team", name: "Team", icon: CubeIcon },
   { id: "connections", name: "Models and agents", icon: PlugIcon },
+  { id: "usage", name: "Usage", icon: ClockIcon },
   { id: "knowledge", name: "Knowledge", icon: BookIcon },
   { id: "people", name: "People", icon: PeopleIcon },
   { id: "alerts", name: "Notifications and Stage", icon: BellIcon },
@@ -228,6 +231,10 @@ export function SettingsView() {
           <ShortcutList />
         </Section>
 
+        <Section title="Emoji">
+          <EmojiSettings />
+        </Section>
+
         <Section title="Look">
           <div className="flex items-center gap-4 border-b py-3">
             <div className="min-w-0 flex-1 font-medium">Appearance</div>
@@ -239,6 +246,7 @@ export function SettingsView() {
               ))}
             </div>
           </div>
+          <Switch label="Views in replies" hint="A cube may show a table, a chart or a short form in its reply when that reads better than text." checked={settings.richUi !== false} onChange={(v) => set("richUi", v)} />
           <Switch label="Calm cubes" hint="Cubes stop twisting their layers while they work. Their faces still change." checked={settings.calm} onChange={(v) => set("calm", v)} />
         </Section>
 
@@ -294,6 +302,8 @@ export function SettingsView() {
         </Section>
           </>
         )}
+
+        {tab === "usage" && <UsageSettings />}
 
         {tab === "connections" && (
           <>

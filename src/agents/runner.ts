@@ -65,6 +65,11 @@ export function logLine(line: string): void {
 /** Names of the agent programs found on this computer: any of "claude", "codex", "hermes". */
 export const detectEngines = () => invoke<string[]>("detect_engines");
 export const ensureSpace = (name: string) => invoke<string>("ensure_space", { name });
+/** Opens the system's folder dialog; the folder the person picks becomes a workspace. Null when they close it. */
+export const workspacePick = () => invoke<{ dir: string; name: string; git: boolean; missing: boolean } | null>("workspace_pick");
+export const workspaceList = () => invoke<{ dir: string; name: string; git: boolean; missing: boolean }[]>("workspace_list");
+/** Closes a workspace: Cube may no longer work there. The folder is not touched. */
+export const workspaceRemove = (dir: string) => invoke<void>("workspace_remove", { dir });
 export const listFiles = (dir: string) => invoke<DiskFile[]>("list_files", { dir });
 export const readText = (path: string, maxBytes?: number) => invoke<string>("read_text", { path, maxBytes });
 
@@ -223,6 +228,42 @@ export interface ProgramLibrary {
   memory: { name: string; about: string; path: string }[];
 }
 export const libraryProgram = (program: string) => invoke<ProgramLibrary>("library_program", { program });
+/** One session an agent program keeps on this computer, as a line in the list to bring one in from. */
+export interface SessionInfo {
+  program: "claude" | "codex";
+  id: string;
+  title: string;
+  /** The folder it works in. */
+  cwd: string;
+  /** When it last changed, in milliseconds. */
+  updated: number;
+  /** The program is running it right now. */
+  live: boolean;
+  path: string;
+}
+/** What was said in a session: the words only, with no tool calls, results or hidden reasoning. */
+export interface SessionText {
+  /** The program's own summary of the earlier part, when it made one. */
+  summary: string;
+  /** What the session began with. */
+  first: string;
+  turns: { role: "user" | "assistant"; text: string }[];
+  /** How many turns were found in the part of the record that was read. */
+  total: number;
+}
+const SAMPLE_SESSIONS: SessionInfo[] = [
+  { program: "claude", id: "preview-1", title: "Rebuild the pricing page header", cwd: "/Users/you/work/site", updated: Date.now() - 4 * 60_000, live: true, path: "/preview/claude-1.jsonl" },
+  { program: "codex", id: "preview-2", title: "Find why the nightly export is slow", cwd: "/Users/you/work/exports", updated: Date.now() - 3 * 3_600_000, live: false, path: "/preview/codex-2.jsonl" },
+  { program: "claude", id: "preview-3", title: "Draft the Q4 planning memo", cwd: "/Users/you/notes", updated: Date.now() - 26 * 3_600_000, live: false, path: "/preview/claude-3.jsonl" },
+];
+/** The sessions Claude Code and Codex have on this computer (their apps keep theirs in the same place), newest first. Read only. */
+export const sessionsList = () => (inTauri ? invoke<SessionInfo[]>("sessions_list") : Promise.resolve(SAMPLE_SESSIONS));
+/** What was said in one of them. Nothing is continued or changed there. */
+export const sessionRead = (path: string) =>
+  inTauri
+    ? invoke<SessionText>("session_read", { path })
+    : Promise.resolve<SessionText>({ summary: "", first: "The header on the pricing page breaks on narrow screens. Rebuild it.", turns: [{ role: "user", text: "Keep the three plans in one row down to 720px." }, { role: "assistant", text: "Done in header.tsx. Below 720px the plans stack; the toggle stays on top." }], total: 2 });
+
 /** The text of a skill or note the library lists. Markdown in the programs' folders and Cube's knowledge folder only. */
 export const libraryRead = (path: string) => invoke<string>("library_read", { path });
 

@@ -26,3 +26,6 @@ dist-ssr
 # Claude Code local files
 .claude/.bc-*.json
 .claude/.bc-explain/
+
+# Written by the test runner wrapper
+.vitest/

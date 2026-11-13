@@ -6,7 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { CubeStill } from "@/cube/Cube";
 import { searchMessages, snippet } from "@/lib/search";
 import { cn } from "@/lib/utils";
-import { useCube } from "@/state/store";
+import { useCube, labelOf } from "@/state/store";
 
 /** ⌘K: jump to a conversation by name, or find a message by its words. */
 export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
@@ -84,7 +84,7 @@ export function Palette({ open, onOpenChange }: { open: boolean; onOpenChange: (
                 <button type="button" className={cn(row(i), "items-start")} onMouseEnter={() => setPick(i)} onClick={() => choose(i)}>
                   <span className="min-w-0 flex-1">
                     <span className="block text-xs text-muted-foreground">
-                      <span className="font-semibold text-foreground">{authorName(m.author)}</span> in {conv ? (conv.kind === "dm" ? conv.name : `#${conv.name}`) : "a conversation"} · {new Date(m.ts).toLocaleDateString([], { month: "short", day: "numeric" })} {timeOf(m.ts)}
+                      <span className="font-semibold text-foreground">{authorName(m.author)}</span> in {conv ? labelOf(conv) : "a conversation"} · {new Date(m.ts).toLocaleDateString([], { month: "short", day: "numeric" })} {timeOf(m.ts)}
                     </span>
                     <span className="block truncate text-[13px]">{snippet(m.text, q)}</span>
                   </span>

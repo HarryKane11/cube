@@ -21,6 +21,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 mod browser;
 mod drive;
 mod knowledge;
+mod sessions;
+mod usage;
+mod workspace;
 mod picture;
 mod remote;
 mod slack;
@@ -63,7 +66,7 @@ pub(crate) fn root() -> PathBuf {
 }
 
 /// A desktop app does not inherit the terminal PATH, so ask the login shell once.
-fn shell_path() -> &'static str {
+pub(crate) fn shell_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         let mut parts: Vec<String> = Vec::new();
@@ -91,14 +94,15 @@ fn shell_path() -> &'static str {
     })
 }
 
-/// Resolves a path and refuses anything outside ~/CubeSpaces.
+/// Resolves a path and refuses anything outside the places Cube may work in: ~/CubeSpaces, and
+/// the folders the person opened as workspaces (workspace.rs).
 pub(crate) fn inside_root(p: &Path) -> Result<PathBuf, String> {
     let real = p.canonicalize().map_err(|e| e.to_string())?;
     let base = root().canonicalize().map_err(|e| e.to_string())?;
-    if real.starts_with(&base) {
+    if real.starts_with(&base) || workspace::holds(&real) {
         Ok(real)
     } else {
-        Err("That path is outside the CubeSpaces folder.".into())
+        Err("That path is outside the CubeSpaces folder and the folders you opened as workspaces.".into())
     }
 }
 
@@ -381,7 +385,13 @@ async fn rename_path(dir: String, from: String, to: String) -> Result<(), String
 #[tauri::command]
 async fn trash_path(dir: String, rel: String) -> Result<(), String> {
     let base = inside_root(Path::new(&dir))?;
-    to_trash(&inside_root(&base.join(safe_rel(&rel)?))?)
+    let target = inside_root(&base.join(safe_rel(&rel)?))?;
+    // A workspace is the person's own folder, with more in it than Cube made: a file in it can go
+    // to the Trash, the folder itself never.
+    if workspace::roots().iter().any(|r| r.starts_with(&target)) {
+        return Err("That is a folder you opened as a workspace. Cube does not move it to the Trash.".into());
+    }
+    to_trash(&target)
 }
 
 #[derive(Serialize)]
@@ -1142,7 +1152,18 @@ pub fn run() {
         .manage(drive::Drive::default())
         .manage(slack::Slack::default())
         .manage(update::Updates::default())
+        .setup(|app| {
+            // Files in the workspaces opened before can be shown in the app again.
+            workspace::restore(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            workspace::workspace_pick,
+            workspace::workspace_list,
+            workspace::workspace_remove,
+            sessions::sessions_list,
+            sessions::session_read,
+            usage::usage_read,
             agent_start,
             agent_stop,
             agent_write,
@@ -1194,6 +1215,8 @@ pub fn run() {
             slack::slack_start,
             slack::slack_post,
             slack::slack_user,
+            slack::slack_emoji,
+            slack::slack_emoji_image,
             slack::slack_upload,
             slack::slack_scopes,
             picture::draw_picture,

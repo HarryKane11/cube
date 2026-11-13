@@ -100,3 +100,23 @@ describe("who may call the Orchestrator by naming it", () => {
     expect(mayCallLead(false, true)).toBe(false);
   });
 });
+
+describe("the built-in cubes' Korean names", () => {
+  it("are shown in Korean and left alone in English", async () => {
+    const { AGENTS, agentNamed, koNames, nameIn } = await import("./types");
+    // A name with a Korean particle written onto it is still that cube. More Latin letters make it another word.
+    expect(agentNamed("Orchestrator한테")?.id).toBe("orchestrator");
+    expect(agentNamed("writer")?.id).toBe("writer");
+    expect(agentNamed("라이터에게")?.id).toBe("writer");
+    expect(agentNamed("WriterPro")).toBeUndefined();
+    expect(agentNamed("Writer2")).toBeUndefined();
+    expect(agentNamed("한테")).toBeUndefined();
+    const writer = AGENTS.find((a) => a.id === "writer")!;
+    expect(nameIn(writer, "ko")).toBe("라이터");
+    expect(nameIn(writer, "en")).toBe("Writer");
+    // A sub-agent keeps the name its maker gave it.
+    expect(nameIn({ id: "my-helper", name: "Helper" }, "ko")).toBe("Helper");
+    expect(koNames("@Designer 이걸로 만들어 줄래요?")).toBe("@디자이너 이걸로 만들어 줄래요?");
+    expect(koNames("docs/Builder.md")).toBe("docs/Builder.md");
+  });
+});

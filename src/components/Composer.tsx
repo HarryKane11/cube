@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import { modeChanged, send, stopAll } from "@/agents/orchestrator";
 import { inTauri, writeBytes } from "@/agents/runner";
-import { MODES, agentById, type AgentDef, type Mode } from "@/agents/types";
+import { MODES, agentById, type AgentDef, type Mode, nameIn } from "@/agents/types";
 import { AtIcon, ChevronIcon, ClipIcon, CloseIcon, MicIcon, SendIcon, StopIcon } from "@/components/icons";
 import { kindOf } from "@/lib/files";
 import { PromptInput, PromptInputActions, PromptInputTextarea } from "@/components/ui/prompt-input";
@@ -79,9 +79,19 @@ function ModePicker({ convId }: { convId: string }) {
   const shared = useCube((s) => Boolean(s.convs.find((c) => c.id === convId)?.shared));
   const setConvMode = useCube((s) => s.setConvMode);
   const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
   const now = MODES.find((m) => m.id === mode) ?? MODES[0];
+  // A click on a button does not focus it in the app's web view, so leaving is not always a blur:
+  // the menu also closes on a press anywhere outside it.
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => { if (!wrap.current?.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("pointerdown", away, true);
+    return () => document.removeEventListener("pointerdown", away, true);
+  }, [open]);
   return (
     <div
+      ref={wrap}
       className="relative"
       onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false); }}
       onKeyDown={(e) => { if (e.key === "Escape" && open) { e.stopPropagation(); setOpen(false); } }}
@@ -214,6 +224,7 @@ export function Composer({ conv, parentId }: { conv: Conv; parentId?: string }) 
   // An "@" being typed at the end of the draft opens the member picker.
   const partial = conv.kind === "channel" && !closed ? draft.match(/(?:^|\s)@([\p{L}\p{N}]*)$/u)?.[1] : undefined;
   const team = useCube((s) => s.team);
+  const lang = useCube((s) => s.settings.lang);
   const inChannel = useCube((s) => (conv.shared ? s.teamLive.convMembers?.[conv.shared.id] : undefined));
   const options = useMemo(() => {
     if (partial === undefined) return [];
@@ -221,15 +232,16 @@ export function Composer({ conv, parentId }: { conv: Conv; parentId?: string }) 
     const cubes: Pick[] = conv.members
       .map((id) => agentById(id))
       .filter((a): a is AgentDef => Boolean(a))
-      .filter((a) => starts(a.name))
-      .map((a) => ({ key: a.id, name: a.name, note: a.role, agent: a }));
+      // A built-in cube answers to its English name and, in Korean, to its Korean one. What is put in the draft is the one this language shows.
+      .filter((a) => starts(a.name) || starts(nameIn(a, lang)))
+      .map((a) => ({ key: a.id, name: nameIn(a, lang), note: a.role, agent: a }));
     // In a shared channel the people in it can be tagged too: they are told, and no cube takes the message.
     const people: Pick[] = !conv.shared ? [] : team.members
       .filter((m) => m.pubkey !== team.info?.pubkey && (!conv.shared?.private || conv.person || inChannel?.includes(m.pubkey)))
       .filter((m) => starts(tagOf(m.name)))
       .map((m) => ({ key: m.pubkey, name: tagOf(m.name), note: "Teammate", pubkey: m.pubkey, shown: m.name }));
     return [...people, ...cubes];
-  }, [partial, conv.members, conv.shared, conv.person, team, inChannel]);
+  }, [partial, conv.members, conv.shared, conv.person, team, inChannel, lang]);
   const open = options.length > 0;
 
   const change = (v: string) => {
@@ -276,7 +288,7 @@ export function Composer({ conv, parentId }: { conv: Conv; parentId?: string }) 
       ? "Step in: say what should change"
       : conv.kind === "dm"
         ? `Message ${conv.name}`
-        : conv.person ? `Message ${conv.name}. Type @ to bring in a cube` : `Message #${conv.name}. Type @ to hand work to a cube`;
+        : conv.person ? `Message ${conv.name}. Type @ to bring in a cube` : conv.chat ? "Message the team. Type @ to hand work to a cube" : `Message #${conv.name}. Type @ to hand work to a cube`;
 
   return (
     <div className="relative flex flex-col gap-1 px-3 pb-3 pt-1" ref={box} onPaste={onPaste} onDrop={onDrop} onDragOver={(e) => { if (e.dataTransfer.types.includes("Files")) e.preventDefault(); }}>

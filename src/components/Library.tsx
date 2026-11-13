@@ -9,7 +9,7 @@ import { KnowMark } from "@/cube/Cube";
 import type { KnowIcon } from "@/cube/icons";
 import { entries, filtered, KINDS, SOURCE_NAME, sourcesOf, type Entry, type Held, type Kind, type Source } from "@/lib/library";
 import { cn } from "@/lib/utils";
-import { useCube } from "@/state/store";
+import { useCube, labelOf } from "@/state/store";
 
 type Program = Exclude<Source, "cube">;
 const PROGRAMS: Program[] = ["claude", "codex", "hermes"];
@@ -148,7 +148,7 @@ export function Library() {
                         <button type="button" className="flex min-h-10 w-full items-center gap-2 rounded-xl px-1.5 text-left hover:bg-accent" onClick={() => { select(conv.id, file.rel, true); setActive(conv.id); }}>
                           <Glyph kind={file.kind} name={file.rel} />
                           <span className="min-w-0 flex-1 truncate font-medium" data-notranslate>{file.rel}</span>
-                          <span className="flex-none truncate text-xs text-muted-foreground">{conv.kind === "dm" ? conv.name : `#${conv.name}`}{by && ` · ${by.name}`}</span>
+                          <span className="flex-none truncate text-xs text-muted-foreground">{labelOf(conv)}{by && ` · ${by.name}`}</span>
                         </button>
                       </li>
                     );

@@ -13,7 +13,9 @@ describe("kindOf", () => {
 
   it("draws only office kinds with the system's icon", () => {
     expect(hasSystemIcon("word")).toBe(true);
-    expect(hasSystemIcon("md")).toBe(false);
+    // Every kind is drawn as Finder draws it.
+    expect(hasSystemIcon("md")).toBe(true);
+    expect(hasSystemIcon("image")).toBe(true);
     expect(extOf("a/b/Report.Docx")).toBe("docx");
     expect(extOf("Makefile")).toBe("");
   });

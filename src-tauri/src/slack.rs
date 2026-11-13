@@ -199,6 +199,54 @@ pub async fn slack_scopes() -> Result<Vec<String>, String> {
     Ok(scopes.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s.len() <= 60).collect())
 }
 
+/// True for an address Slack serves emoji pictures from. Nothing else is ever fetched for an emoji.
+fn emoji_host(url: &str) -> bool {
+    reqwest::Url::parse(url).ok().is_some_and(|u| u.scheme() == "https" && u.host_str().is_some_and(|h| h.ends_with(".slack-edge.com") || h.ends_with(".slack.com")))
+}
+
+/// The Slack workspace's own emoji: each name with where its picture is. An alias comes with the
+/// picture of the emoji it stands for. Needs the `emoji:read` permission.
+#[tauri::command]
+pub async fn slack_emoji() -> Result<Vec<(String, String)>, String> {
+    let bot = token("bot").ok_or_else(|| "Slack is not connected.".to_string())?;
+    let v = call("emoji.list", &bot, None, &[]).await?;
+    let map = v.get("emoji").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for (name, url) in &map {
+        let mut url = url.as_str().unwrap_or_default();
+        if let Some(target) = url.strip_prefix("alias:") {
+            url = map.get(target).and_then(Value::as_str).unwrap_or_default();
+        }
+        if name.len() <= 120 && emoji_host(url) {
+            out.push((name.clone(), url.to_string()));
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// One emoji's picture, as a data URL the app can draw. Only from Slack's own hosts, and only a small image.
+#[tauri::command]
+pub async fn slack_emoji_image(url: String) -> Result<String, String> {
+    use base64::Engine;
+    if !emoji_host(&url) {
+        return Err("That is not an emoji of the Slack workspace.".into());
+    }
+    let res = client()?.get(&url).send().await.map_err(|e| format!("Could not reach Slack: {}", e.without_url()))?;
+    if !res.status().is_success() {
+        return Err(format!("Slack answered {}.", res.status().as_u16()));
+    }
+    let mime = res.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("image/png").split(';').next().unwrap_or("image/png").trim().to_string();
+    if !mime.starts_with("image/") {
+        return Err("That is not a picture.".into());
+    }
+    let bytes = res.bytes().await.map_err(|e| e.without_url().to_string())?;
+    if bytes.len() > 1_500_000 {
+        return Err("That picture is too large for an emoji.".into());
+    }
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes)))
+}
+
 /// The name a Slack member goes by.
 #[tauri::command]
 pub async fn slack_user(user: String) -> Result<String, String> {

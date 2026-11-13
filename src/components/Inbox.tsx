@@ -5,7 +5,7 @@ import { timeOf } from "@/components/bits";
 import { CubeStill } from "@/cube/Cube";
 import { inboxEntries, type Entry } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
-import { useCube } from "@/state/store";
+import { useCube, labelOf } from "@/state/store";
 
 /** How many things wait on the person right now. */
 export function useInboxCount(): number {
@@ -43,7 +43,7 @@ function Row({ e }: { e: Entry }) {
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <button type="button" className="text-left" onClick={open}>
           <span className="block font-semibold">{e.title}</span>
-          <span className="block text-xs text-muted-foreground">{conv ? (conv.kind === "dm" ? `Direct message with ${conv.name}` : `#${conv.name}`) : "Added by hand"} · {timeOf(e.ts)}</span>
+          <span className="block text-xs text-muted-foreground">{conv ? (conv.kind === "dm" ? `Direct message with ${conv.name}` : labelOf(conv)) : "Added by hand"} · {timeOf(e.ts)}</span>
         </button>
         {e.detail && <p className={cn("selectable line-clamp-4 whitespace-pre-wrap rounded-xl bg-muted px-3 py-1.5 text-[13px] [overflow-wrap:anywhere]", e.kind === "ask" && "font-mono", e.kind === "stuck" && "bg-destructive/10 text-destructive")}>{e.detail}</p>}
         <div className="flex flex-wrap gap-1.5">
@@ -64,8 +64,10 @@ function Row({ e }: { e: Entry }) {
           )}
           {e.kind === "decision" && e.ref && (
             <>
-              <button type="button" className={cn(pill, "bg-primary text-primary-foreground")} onClick={() => setDecision(e.ref!, "ok")}>That's fine</button>
-              <button type="button" className={cn(pill, "bg-secondary")} onClick={change}>Change it</button>
+              <button type="button" className={cn(pill, "bg-primary text-primary-foreground")} title="Leaves it as the cube did it and takes this off the list" onClick={() => setDecision(e.ref!, "ok")}>Keep it this way</button>
+              <button type="button" className={cn(pill, "bg-secondary")} title="Opens the conversation so you can say how you want it" onClick={change}>Ask to change it</button>
+              {/* Said in words: what this entry is and that nothing is held up by it. */}
+              <span className="basis-full text-xs text-muted-foreground">You did not say how, so the cube picked. Nothing waits on this: keep it, or ask for it another way.</span>
             </>
           )}
           {(e.kind === "question" || e.kind === "reply" || e.kind === "stuck" || e.kind === "plan") && (
@@ -121,7 +123,7 @@ export function Inbox() {
                       <span className="text-xs text-muted-foreground">{agent?.name ?? d.agentId} · {new Date(d.ts).toLocaleDateString([], { month: "short", day: "numeric" })} {timeOf(d.ts)}</span>
                     </button>
                     {d.state === "new" ? (
-                      <button type="button" className={cn(pill, "flex-none bg-secondary")} onClick={() => setDecision(d.id, "ok")}>That's fine</button>
+                      <button type="button" className={cn(pill, "flex-none bg-secondary")} onClick={() => setDecision(d.id, "ok")}>Keep it this way</button>
                     ) : (
                       <span className="flex-none text-xs text-muted-foreground">Looked over</span>
                     )}

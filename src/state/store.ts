@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { WORK_KEPT, type Imported, type WorkEntry } from "@/agents/context";
 import { persist } from "zustand/middleware";
 import type { Manifest } from "../agents/custom";
 import type { RemoteAgent } from "../agents/remote/a2a";
@@ -10,7 +11,8 @@ import type { TeamMember } from "../team/events";
 import type { Decision, Note, PlanStep } from "../agents/notes";
 import type { Question } from "../agents/permissions";
 import type { Branch } from "../agents/trees";
-import type { ActKind, AgentKind, Mode, Palette, RunOpts, Status, Trust } from "../agents/types";
+import type { ActKind, AgentKind, Mode, Palette, RunOpts, Status, Todo, Trust } from "../agents/types";
+import type { ProgramUsage, UsageProgram } from "../agents/usage";
 import { AGENTS, ORCH, ROUTER, applyPalettes, isLeadRole, setSubagents } from "../agents/types";
 import type { Lang } from "../i18n";
 import { kindOf, type FileKind } from "../lib/files";
@@ -26,6 +28,21 @@ export interface Conv {
   members: string[];
   dir: string;
   createdAt: number;
+  /**
+   * A chat: a conversation with the whole team that was simply started, from Home, and not set
+   * up as a channel. It works as a channel does (the Router reads what names nobody) and is named
+   * after what it began with.
+   */
+  chat?: boolean;
+  /** The one conversation with the whole team: written to like a direct message, handed out like a channel. */
+  cube?: boolean;
+  /**
+   * Set for a chat that works in a folder of the person's own, opened as a workspace: the folder's
+   * path. Its cubes work there directly, and Cube keeps no copies of it and never deletes it.
+   */
+  workspace?: string;
+  /** Set for a chat that began from a session of another program: what was said there, given to the cubes here as background. */
+  imported?: Imported;
   /**
    * A direct conversation with one teammate, by their key. It is a private shared channel with
    * the two of them in it; the cubes are there too, and join only when they are named.
@@ -47,6 +64,20 @@ export interface Conv {
   };
 }
 
+/** A folder of the person's own that they opened for cubes to work in, as a project folder is opened in a coding agent. */
+export interface Workspace {
+  dir: string;
+  /** The folder's own name. */
+  name: string;
+  /** Whether it is a git repository: the person's way back when a cube changed something. */
+  git: boolean;
+  /** The folder is not there now. */
+  missing?: boolean;
+}
+
+/** The name a workspace folder goes by: its own. */
+export const workspaceName = (dir: string): string => dir.replace(/\/+$/, "").split("/").pop() || dir;
+
 /** How a shared folder stands on this computer right now. */
 export interface DriveLive {
   /** Instruction files a teammate changed, waiting for this person's yes. */
@@ -63,9 +94,19 @@ export interface DriveLive {
 
 export const NO_DRIVE: DriveLive = { held: [], skipped: [], moving: 0, touched: {}, notes: [] };
 
+/** Something the team could do next, in words the person could send as they are. */
+export interface Suggestion {
+  id: string;
+  text: string;
+  at: number;
+  state: "new" | "taken" | "dismissed";
+}
+
 export interface Act {
   kind: ActKind;
   label: string;
+  /** How much of the reply had been written when this step was taken: where it belongs in it. */
+  at?: number;
 }
 
 /** A helper at work for a cube: who it is, what it runs on, what it last said, and what came of it. */
@@ -100,6 +141,15 @@ export interface Ask {
   answer?: string;
   /** "gone": the run ended before anyone answered. */
   state: "waiting" | "allowed" | "denied" | "gone";
+}
+
+/** How a conversation is called in a line of text: a channel with its #, a chat or a direct message by its name alone. */
+export const labelOf = (conv: Pick<Conv, "kind" | "name" | "person" | "chat">): string => (conv.kind === "dm" || conv.person || conv.chat ? conv.name : `#${conv.name}`);
+
+/** A chat's name, from the words it began with: the first line, cut to what fits in the sidebar. */
+export function chatTitle(text: string): string {
+  const line = text.trim().split("\n")[0].replace(/\s+/g, " ");
+  return line.length > 40 ? `${line.slice(0, 39).trimEnd()}…` : line || "New chat";
 }
 
 export interface Msg {
@@ -142,12 +192,16 @@ export interface Msg {
   decided?: number;
   /** Sent by a schedule, not typed just now. */
   scheduled?: boolean;
+  /** The agent's own list of what it is doing in this run, as it last stood. */
+  todo?: Todo[];
   /** The plan the Orchestrator wrote in this message, step by step. */
   steps?: PlanStep[];
   /** The number of the plan step being worked on now. */
   stepNow?: number;
   /** The plan ran to its end. */
   stepsDone?: boolean;
+  /** The plan stopped before its last step: the Orchestrator gave its answer, or could not go on. The steps reached stay as they are. */
+  stepsEnded?: boolean;
   /** What the agent left on its own branch, when it worked in a separate copy of the folder. */
   branch?: Branch;
   /** A teammate's message, or their agent's: who signed it. Never treated as something to act on. */
@@ -168,6 +222,8 @@ export interface Msg {
   took?: number;
   /** What the run used, when the engine reports it. */
   usage?: Usage;
+  /** The agent program the run was made on. */
+  engine?: AgentKind;
 }
 
 export interface Usage {
@@ -247,6 +303,14 @@ export interface Settings {
   maxHops: number;
   /** Keep cubes still instead of twisting while they work. */
   calm: boolean;
+  /** Cubes may put a view (a table, a chart, a few numbers, a form) in a reply. On unless turned off. */
+  richUi?: boolean;
+  /** The workspace folder the next chat begun on Home works in. Unset: a folder of its own under CubeSpaces. */
+  workspace?: string;
+  /** The sections of the sidebar that are folded away, by name. */
+  folded?: string[];
+  /** How Cube's own mark is drawn: what fills it and the figure on its front. Plain when unset. See cube/CubeMark.tsx. */
+  cubeLook?: { shape?: "mark" | "cube"; fill?: string; colors?: [string, string, string]; symbol?: string; spread?: "face" | "tiles" };
   /** Show the file tree beside whatever is on the Stage. */
   tree: boolean;
   /** Show the full sidebar. Off: a narrow rail of icons. */
@@ -289,6 +353,8 @@ export interface KnowledgeState {
   model: string;
   /** Keep memory, skills and the wiki up to date without being asked. */
   auto: boolean;
+  /** The fewest hours between two wiki runs. Unset: the usual three. */
+  wikiEvery?: number;
   /** When each job last finished well. */
   last: Partial<Record<JobKind, number>>;
   /** The time of the last conversation line each job has read. */
@@ -330,6 +396,9 @@ interface CubeState {
   notes: Note[];
   /** Session key → ids of the notes that session has already been told. */
   told: Record<string, string[]>;
+  /** What each cube did in each conversation, as Cube saw it: by conversation, then by cube. Given to a cube that starts without a session. */
+  worklog: Record<string, Record<string, WorkEntry[]>>;
+  addWork(convId: string, agentId: string, entry: WorkEntry): void;
   /** Per conversation, the latest pictures of what agents were looking at. Not saved. */
   shots: Record<string, Shot[]>;
   /** Per conversation, the app window the Screen tab is following. Not saved. */
@@ -347,6 +416,24 @@ interface CubeState {
   cleared: Record<string, boolean>;
   /** Role id → the three face colors the person picked for its cube: front, top, side. */
   palettes: Record<string, Palette>;
+  /** Role id → what the person chose for its cube to hold: an id from the catalog, or "none". Unset: what fits its role. */
+  outfits: Record<string, string>;
+  /** The workspace's own emoji: name → picture. Read from one file when the app opens (lib/emoji.ts), not kept with the rest. */
+  emojis: Record<string, string>;
+  setEmojis(emojis: Record<string, string>): void;
+  /** The folders open as workspaces. The app's own side keeps the list (workspace.rs); this is what it last said. */
+  workspaces: Workspace[];
+  setWorkspaces(workspaces: Workspace[]): void;
+  /** What each agent program says is used of the plan it is signed in with. */
+  usage: Partial<Record<UsageProgram, ProgramUsage>>;
+  setUsage(program: UsageProgram, usage: ProgramUsage): void;
+  /** `${agentId}:${engine}` → the model the program said it ran that role on last. */
+  ran: Record<string, string>;
+  setRan(key: string, model: string): void;
+  /** Engine → the model the program uses when none is picked, as its own settings say. */
+  programModels: Record<string, string>;
+  setProgramModels(models: Record<string, string>): void;
+  setOutfit(agentId: string, prop: string | undefined): void;
   /** Programs of the person's own found in ~/CubeSpaces/.agents. Not saved: read again at every start. */
   customs: Manifest[];
   /** Role id → the custom agent that powers it, when the role runs on one. */
@@ -393,6 +480,13 @@ interface CubeState {
   /** Where the knowledge folder is, and how many notes, skills and pages it holds. */
   knowledgeDir: string;
   knowledgeCount: number;
+  /** When Cube last wrote CUBE.md, the file a cube starts from. Unset until it has, in this run of the app. */
+  cubeMdAt?: number;
+  setCubeMdAt(at: number): void;
+  /** Things the team could do next, offered after the wiki was written. The person starts one or lets it go. */
+  suggestions: Suggestion[];
+  addSuggestions(texts: string[]): void;
+  setSuggestion(id: string, state: Suggestion["state"]): void;
   /** Agents that run somewhere else, added by the person. Their credentials are in the Keychain, not here. */
   remotes: RemoteAgent[];
   /** Role id → the remote agent that powers it, when the role runs on one. */
@@ -501,6 +595,8 @@ interface CubeState {
   patchAsk(msgId: string, askId: string, state: Ask["state"], answer?: string): void;
   openProfile(agentId: string): void;
   addNote(note: Note): void;
+  /** Keeps something Cube picked up about how the person talks with it. No approval: it shapes only Cube's manner. */
+  addSelf(text: string, convId?: string): void;
   keepNote(id: string): void;
   forgetNote(id: string): void;
   markTold(key: string, ids: string[]): void;
@@ -537,11 +633,19 @@ interface CubeState {
   openThread(id: string | undefined): void;
 }
 
+/** How many things Cube keeps about how the person talks with it. */
+const SELF_KEPT = 24;
+
 const idleLive = (): Record<string, Live> =>
   Object.fromEntries(AGENTS.map((a) => [a.id, { status: "idle" as Status, statement: "" }]));
 
+/** The conversation between the person and the whole team: theirs alone, and never deleted. */
+export const CUBE_DM = "dm-cube";
+const cubeConv = (): Conv => ({ id: CUBE_DM, kind: "channel", name: "Cube", members: AGENTS.map((a) => a.id), dir: "", createdAt: 0, chat: true, cube: true });
+
 const defaultConvs = (): Conv[] => [
   { id: "general", kind: "channel", name: "general", members: AGENTS.map((a) => a.id), dir: "", createdAt: 0 },
+  cubeConv(),
   // The Router and the Orchestrator have no direct message: alone they have nobody to hand work to.
   ...AGENTS.filter((a) => !isLeadRole(a.id)).map((a): Conv => ({ id: `dm-${a.id}`, kind: "dm", name: a.name, members: [a.id], dir: "", createdAt: 0 })),
 ];
@@ -563,6 +667,8 @@ export const useCube = create<CubeState>()(
       allow: {},
       notes: [],
       told: {},
+      worklog: {},
+      addWork: (convId, agentId, entry) => set((s) => ({ worklog: { ...s.worklog, [convId]: { ...s.worklog[convId], [agentId]: [...(s.worklog[convId]?.[agentId] ?? []), entry].slice(-WORK_KEPT) } } })),
       shots: {},
       follow: {},
       captureDenied: false,
@@ -572,6 +678,18 @@ export const useCube = create<CubeState>()(
       decisions: [],
       cleared: {},
       palettes: {},
+      outfits: {},
+      emojis: {},
+      setEmojis: (emojis) => set({ emojis }),
+      workspaces: [],
+      setWorkspaces: (workspaces) => set({ workspaces }),
+      usage: {},
+      setUsage: (program, usage) => set((s) => ({ usage: { ...s.usage, [program]: usage } })),
+      ran: {},
+      setRan: (key, model) => set((s) => (s.ran[key] === model ? s : { ran: { ...s.ran, [key]: model } })),
+      programModels: {},
+      setProgramModels: (programModels) => set({ programModels }),
+      setOutfit: (agentId, prop) => set((s) => { const outfits = { ...s.outfits }; if (prop) outfits[agentId] = prop; else delete outfits[agentId]; return { outfits }; }),
       customs: [],
       customFor: {},
       remotes: [],
@@ -587,6 +705,15 @@ export const useCube = create<CubeState>()(
       knowledgeBusy: undefined,
       knowledgeDir: "",
       knowledgeCount: 0,
+      setCubeMdAt: (cubeMdAt) => set({ cubeMdAt }),
+      suggestions: [],
+      // What was already offered is not offered twice, whatever became of it.
+      addSuggestions: (texts) => set((s) => {
+        const known = new Set(s.suggestions.map((x) => x.text));
+        const fresh = texts.filter((t) => t && !known.has(t)).map((text, i) => ({ id: `sg-${Date.now().toString(36)}-${i}`, text, at: Date.now(), state: "new" as const }));
+        return fresh.length ? { suggestions: [...s.suggestions, ...fresh].slice(-60) } : {};
+      }),
+      setSuggestion: (id, state) => set((s) => ({ suggestions: s.suggestions.map((x) => (x.id === id ? { ...x, state } : x)) })),
       trees: {},
       schedules: [],
       seenAt: Date.now(),
@@ -706,7 +833,7 @@ export const useCube = create<CubeState>()(
           return { clashes: { ...s.clashes, [convId]: next } };
         }),
       dropClash: (convId, id) => set((s) => ({ clashes: { ...s.clashes, [convId]: id ? (s.clashes[convId] ?? []).filter((c) => c.id !== id) : [] } })),
-      clearHistory: () => set({ messages: [], sessions: {}, told: {}, shots: {}, unread: {}, decisions: [], cleared: {}, threadId: undefined, live: idleLive() }),
+      clearHistory: () => set({ messages: [], sessions: {}, told: {}, worklog: {}, shots: {}, unread: {}, decisions: [], cleared: {}, threadId: undefined, live: idleLive() }),
       restartOnboarding: () => set({ onboarded: false }),
       setName: (name) => set({ name }),
       setAvatar: (avatar) => set({ avatar }),
@@ -733,6 +860,15 @@ export const useCube = create<CubeState>()(
         })),
       openProfile: (agentId) => set({ view: "agent", profileId: agentId, threadId: undefined }),
       addNote: (note) => set((s) => (s.notes.some((n) => n.agentId === note.agentId && n.text === note.text) ? s : { notes: [...s.notes, note] })),
+      addSelf: (text, convId) =>
+        set((s) => {
+          if (s.notes.some((n) => n.agentId === ROUTER && n.text === text)) return s;
+          const note: Note = { id: `self-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, agentId: ROUTER, text, ts: Date.now(), state: "kept", convId, self: true };
+          // Only so many: the oldest of what Cube picked up by itself makes room. What the person approved stays.
+          const own = s.notes.filter((n) => n.self);
+          const drop = own.length >= SELF_KEPT ? new Set(own.slice(0, own.length - SELF_KEPT + 1).map((n) => n.id)) : undefined;
+          return { notes: [...(drop ? s.notes.filter((n) => !drop.has(n.id)) : s.notes), note] };
+        }),
       keepNote: (id) => set((s) => ({ notes: s.notes.map((n) => (n.id === id ? { ...n, state: "kept" as const } : n)) })),
       forgetNote: (id) => set((s) => ({ notes: s.notes.filter((n) => n.id !== id) })),
       markTold: (key, ids) => set((s) => ({ told: { ...s.told, [key]: ids } })),
@@ -769,6 +905,7 @@ export const useCube = create<CubeState>()(
             unread: without(s.unread),
             driveBase: without(s.driveBase),
             driveLive: without(s.driveLive),
+            worklog: without(s.worklog),
             files: without(s.files),
             tabs: without(s.tabs),
             selected: without(s.selected),
@@ -897,9 +1034,14 @@ export const useCube = create<CubeState>()(
         allow: s.allow,
         notes: s.notes,
         told: s.told,
+        worklog: s.worklog,
         decisions: s.decisions,
+        suggestions: s.suggestions,
         cleared: s.cleared,
         palettes: s.palettes,
+        outfits: s.outfits,
+        usage: s.usage,
+        ran: s.ran,
         customFor: s.customFor,
         remotes: s.remotes,
         knowledge: s.knowledge,
@@ -920,12 +1062,15 @@ export const useCube = create<CubeState>()(
       merge: (saved, current) => {
         const p = (saved ?? {}) as Partial<CubeState>;
         // Channels made before the Router and the Orchestrator existed get them now.
-        const convs = (p.convs?.length ? p.convs : current.convs).map((c) =>
+        const kept = (p.convs?.length ? p.convs : current.convs).map((c) =>
           c.kind === "channel" ? { ...c, members: [...[ROUTER, ORCH].filter((id) => !c.members.includes(id)), ...c.members] } : c,
         );
         applyPalettes(p.palettes ?? {});
         // The sub-agents the person made are back on the team before anything looks one up.
         syncSubagents(p.subagents ?? []);
+        // A workspace from before there was a conversation with the whole team gets one, after its channels.
+        const at = kept.findIndex((c) => c.kind === "dm");
+        const convs = kept.some((c) => c.id === CUBE_DM) ? kept : [...kept.slice(0, at < 0 ? kept.length : at), cubeConv(), ...kept.slice(at < 0 ? kept.length : at)];
         return {
           ...current,
           ...p,

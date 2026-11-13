@@ -331,7 +331,7 @@ pub fn export_from(home: &Path, know: &Path, targets: &[String]) -> Result<Vec<E
 
 fn know_dir() -> Result<PathBuf, String> {
     let dir = crate::root().join(".knowledge");
-    for sub in ["memory", "skills", "wiki", "inbox"] {
+    for sub in ["memory", "skills", "wiki", "inbox", "agents"] {
         fs::create_dir_all(dir.join(sub)).map_err(|e| e.to_string())?;
     }
     Ok(dir)

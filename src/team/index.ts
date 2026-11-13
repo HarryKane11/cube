@@ -314,6 +314,8 @@ export async function leaveTeam(): Promise<void> {
 export async function shareConv(convId: string, isPrivate = false): Promise<void> {
   const conv = store().convs.find((c) => c.id === convId);
   if (!conv || conv.kind !== "channel" || conv.shared) return;
+  // Sharing a channel shares its folder. A workspace is a folder of the person's own, with more in it than this conversation.
+  if (conv.workspace) throw new Error("A chat that works in a folder of your own stays on this computer. Start a channel to work with the team.");
   if (isPrivate && !hasChannels()) throw new Error("This team's relay is an earlier version that cannot keep a channel private. Update the relay first.");
   const id = crypto.randomUUID();
   await teamPublish("conv.put", JSON.stringify({ conv: id, name: conv.name, ...(isPrivate ? { private: true } : {}) }));

@@ -41,6 +41,9 @@ importers:
       '@fontsource/noto-sans-kr':
         specifier: ^5.3.1
         version: 5.3.1
+      '@openuidev/react-lang':
+        specifier: 1.1.1
+        version: 1.1.1(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7)
       '@tailwindcss/vite':
         specifier: ^4.3.5
         version: 4.3.5(vite@8.3.8(@types/node@26.6.6)(jiti@2.7.0))
@@ -134,6 +137,9 @@ importers:
       use-stick-to-bottom:
         specifier: ^1.1.6
         version: 1.1.6(react@19.3.1)
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
       zustand:
         specifier: ^5.1.0
         version: 5.1.0(@types/react@19.3.0)(react@19.3.1)(use-sync-external-store@1.7.0(react@19.3.1))
@@ -447,6 +453,45 @@ packages:
   '@opentelemetry/api@1.10.0':
     resolution: {integrity: sha512-lMkyes8iHrG+mk6WH7X70MdCLI2RS0FwNBY1PyQ8UemaijE2m5mv5A0Niy3HtbYTFrgkUEQjFMXmSAk2hQDuPQ==}
     engines: {node: '>=8.0.0'}
+
+  '@openuidev/devtools@0.3.1':
+    resolution: {integrity: sha512-kOCCsRGwY0w6xL1rVL1zOa9CO97ZrG6YGasRZyCv7FXaDAzbFkEgFy+FhYx6EP7sPKhkgr/jBqunADzhevpBDw==}
+    peerDependencies:
+      '@openuidev/observability': '>=0.0.4 <0.1.0'
+      '@openuidev/react-lang': '>=1.0.0 <2.0.0'
+      react: ^18.3.1 || ^19.0.0
+      react-dom: ^18.0.0 || ^19.0.0
+    peerDependenciesMeta:
+      '@openuidev/react-lang':
+        optional: true
+
+  '@openuidev/lang-core@1.1.1':
+    resolution: {integrity: sha512-bZFkf0/CBqS551gykL6kHVVOn35ZfoRg73nDELTPPxO3NQOc29SIVznhIeE323xSth23I0pGusSimblNv4bZvg==}
+    peerDependencies:
+      '@modelcontextprotocol/sdk': '>=1.0.0'
+      zod: ^3.25.0 || ^4.0.0
+    peerDependenciesMeta:
+      '@modelcontextprotocol/sdk':
+        optional: true
+
+  '@openuidev/observability@0.0.4':
+    resolution: {integrity: sha512-4fjIrWu3TqTlfDE/m7cG10CH1vV7wQk5GPwMOmXeF9vJtkg92dg4Bdk3AjKgud7H7Xypwwjgt52VcLGZCE2CJQ==}
+
+  '@openuidev/react-lang@1.1.1':
+    resolution: {integrity: sha512-Mw6aj+pt7HLc6SrFmMglYOPzNUDoLmRcbL+50tw9RLttUaTU/lVASWV4arpcy0TcOy6jJchiZ/K4FKj1eXAQWg==}
+    peerDependencies:
+      '@modelcontextprotocol/sdk': '>=1.0.0'
+      react: '*'
+      react-dom: '*'
+      react-native: '*'
+      zod: ^3.25.0 || ^4.0.0
+    peerDependenciesMeta:
+      '@modelcontextprotocol/sdk':
+        optional: true
+      react-dom:
+        optional: true
+      react-native:
+        optional: true
 
   '@oxc-project/types@0.156.0':
     resolution: {integrity: sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==}
@@ -1141,6 +1186,10 @@ packages:
   character-reference-invalid@2.0.1:
     resolution: {integrity: sha512-iBZ4F4wRbyORVsu0jPV7gXkOsGYjGHPmAyv+HiHG8gi5PtC9KI2j1+v8/tlibRvjoWX027ypmG/n0HtO5t7unw==}
 
+  ci-info@4.5.0:
+    resolution: {integrity: sha512-d1uM8k5UZEyPza1n/MG3ko8nKupKN0KJpFsipgPcgaCCvV+IqIfJ+NzTjetlLM+UcXZx3+cLrNr76+eAO7G1Mw==}
+    engines: {node: '>=8'}
+
   class-variance-authority@0.7.1:
     resolution: {integrity: sha512-Ka+9Trutv7G8M6WT6SeiRWz792K5qEqIGEGzXKhAE6xOWAY6pPH8U+9IY3oCMv6kqTmLsv7Xh/2w2RigkePMsg==}
 
@@ -1687,6 +1736,11 @@ packages:
 
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
+
+  lucide-react@0.575.0:
+    resolution: {integrity: sha512-VuXgKZrk0uiDlWjGGXmKV6MSk9Yy4l10qgVvzGn2AWBx1Ylt0iBexKOAoA6I7JO3m+M9oeovJd3yYENfkUbOeg==}
+    peerDependencies:
+      react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
   lucide-react@1.72.0:
     resolution: {integrity: sha512-fbF5i1GU8GODETa3Q7rXqrJrcx3iPYrQtxthom103zGx+Z0BGwKYAW9s+9435ohYJ7hQm0av0PoZcqI1CRwNrg==}
@@ -2874,6 +2928,32 @@ snapshots:
 
   '@opentelemetry/api@1.10.0': {}
 
+  '@openuidev/devtools@0.3.1(@openuidev/observability@0.0.4)(@openuidev/react-lang@1.1.1(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)':
+    dependencies:
+      '@openuidev/observability': 0.0.4
+      lucide-react: 0.575.0(react@19.3.1)
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
+    optionalDependencies:
+      '@openuidev/react-lang': 1.1.1(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7)
+
+  '@openuidev/lang-core@1.1.1(zod@4.6.7)':
+    dependencies:
+      ci-info: 4.5.0
+      zod: 4.6.7
+
+  '@openuidev/observability@0.0.4': {}
+
+  '@openuidev/react-lang@1.1.1(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7)':
+    dependencies:
+      '@openuidev/devtools': 0.3.1(@openuidev/observability@0.0.4)(@openuidev/react-lang@1.1.1(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      '@openuidev/lang-core': 1.1.1(zod@4.6.7)
+      '@openuidev/observability': 0.0.4
+      react: 19.3.1
+      zod: 4.6.7
+    optionalDependencies:
+      react-dom: 19.3.1(react@19.3.1)
+
   '@oxc-project/types@0.156.0': {}
 
   '@radix-ui/primitive@1.2.0': {}
@@ -3438,6 +3518,8 @@ snapshots:
 
   character-reference-invalid@2.0.1: {}
 
+  ci-info@4.5.0: {}
+
   class-variance-authority@0.7.1:
     dependencies:
       clsx: 2.1.1
@@ -3894,6 +3976,10 @@ snapshots:
   lru-cache@5.1.1:
     dependencies:
       yallist: 3.1.1
+
+  lucide-react@0.575.0(react@19.3.1):
+    dependencies:
+      react: 19.3.1
 
   lucide-react@1.72.0(@types/react@19.3.0)(react@19.3.1):
     dependencies:

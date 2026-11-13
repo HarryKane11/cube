@@ -53,7 +53,7 @@ export function inboxEntries({ messages, notes, decisions, cleared }: From): Ent
     else if (/\?\s*$/.test(m.text)) out.push({ id: `reply:${m.id}`, kind: "reply", agentId: m.author, convId: m.convId, msgId: m.id, title: `${name(m.author)} asked you something`, detail: m.text, ts: m.ts });
   }
   for (const d of decisions) {
-    if (d.state === "new") out.push({ id: `decision:${d.id}`, kind: "decision", agentId: d.agentId, convId: d.convId, msgId: d.msgId, ref: d.id, title: `${name(d.agentId)} made a call on its own`, detail: d.text, ts: d.ts });
+    if (d.state === "new") out.push({ id: `decision:${d.id}`, kind: "decision", agentId: d.agentId, convId: d.convId, msgId: d.msgId, ref: d.id, title: `${name(d.agentId)} chose this without asking`, detail: d.text, ts: d.ts });
   }
   for (const n of notes) {
     if (n.state === "pending") out.push({ id: `note:${n.id}`, kind: "note", agentId: n.agentId, convId: n.convId, ref: n.id, title: `${name(n.agentId)} wants to remember this`, detail: n.text, ts: n.ts });

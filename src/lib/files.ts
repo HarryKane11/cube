@@ -36,9 +36,13 @@ export function isLooked(kind: FileKind): boolean {
   return kind === "word" || kind === "sheet" || kind === "slides" || kind === "other";
 }
 
-/** Kinds drawn with the icon the system gives their files (Word's, Excel's, PowerPoint's…) when there is one. */
-export function hasSystemIcon(kind: FileKind): boolean {
-  return kind === "word" || kind === "sheet" || kind === "slides";
+/**
+ * Whether a file is drawn with the icon this Mac gives its kind, the one Finder shows: a picture's,
+ * a Markdown document's, the editor's own for code, Word's for a .docx. Every kind is; a file
+ * with no extension has nothing to ask the system by, and keeps Cube's mark.
+ */
+export function hasSystemIcon(_kind: FileKind): boolean {
+  return true;
 }
 
 export const extOf = (path: string) => (path.includes(".") ? path.split(".").pop()!.toLowerCase() : "");

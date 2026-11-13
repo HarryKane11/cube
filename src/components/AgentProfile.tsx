@@ -2,16 +2,20 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "re
 import type { Note } from "@/agents/notes";
 import { getHarness, type Harness, type HarnessItem } from "@/agents/runner";
 import { ruleLabel } from "@/agents/permissions";
-import { AGENTS, EFFORTS, ENGINE_CAN, ENGINES, MODEL_HINTS, TRUSTS, TRUST_ABOUT, agentById, type AgentDef, type AgentKind, PALETTES, type Palette, ROLE_DEFAULTS } from "@/agents/types";
+import { nameIn, ROUTER, AGENTS, EFFORTS, ENGINE_CAN, ENGINES, MODEL_HINTS, TRUSTS, TRUST_ABOUT, agentById, propOf, type AgentDef, type AgentKind, PALETTES, type Palette, ROLE_DEFAULTS } from "@/agents/types";
 import { BrandMark, useEngine } from "@/components/bits";
+import { PropPicker } from "@/components/PropPicker";
+import { ReadAt, UsageBars, useRunsOn } from "@/components/UsageBits";
+import { refreshUsage } from "@/agents/usageRun";
 import { Section, Switch } from "@/components/Settings";
 import { Input } from "@/components/ui/input";
 import { Cube } from "@/cube/Cube";
+import { CUSTOM_FILL, CubeMark, FILLS, FIRST_COLORS, SYMBOLS } from "@/cube/CubeMark";
 import { cn } from "@/lib/utils";
 import { spanOf } from "@/components/MessageItem";
 import { shownEngine } from "@/components/TeamSetup";
 import { statsFor } from "@/lib/stats";
-import { useCube } from "@/state/store";
+import { CUBE_DM, useCube } from "@/state/store";
 
 const KINDS = Object.keys(ENGINES) as AgentKind[];
 const seg = "flex rounded-[10px] bg-secondary p-0.5";
@@ -332,6 +336,133 @@ function CubeColors({ agent }: { agent: AgentDef }) {
   );
 }
 
+/** Under the role's name: the agent program and the model it runs on. */
+function RunsOnLine({ agent }: { agent: AgentDef }) {
+  const { engine, model } = useRunsOn(agent);
+  return (
+    <p className="mt-1 flex items-center gap-1.5 text-[13px] font-medium">
+      <BrandMark kind={engine} className="size-3.5" />
+      <span>{ENGINES[engine].name}</span>
+      <span className="text-muted-foreground" data-notranslate>· {model || "default"}</span>
+    </p>
+  );
+}
+
+/** How much is left of the plan this role's program is signed in with. Shared by every cube on that program. */
+function PlanLeft({ engine }: { engine: AgentKind }) {
+  const plan = useCube((s) => (engine === "claude" || engine === "codex" ? s.usage[engine]?.plan : undefined));
+  useEffect(() => { void refreshUsage(); }, [engine]);
+  if (engine !== "claude" && engine !== "codex") return null;
+  return (
+    <Section title="Plan usage">
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[13px]">
+        <BrandMark kind={engine} className="size-3.5" />
+        <span className="font-semibold">{ENGINES[engine].name}</span>
+        {plan && <span className="rounded-full bg-secondary px-2 py-0.5 text-xs font-semibold capitalize" data-notranslate>{plan}</span>}
+        <span className="flex-1" />
+        <ReadAt program={engine} />
+      </div>
+      <UsageBars program={engine} />
+    </Section>
+  );
+}
+
+/**
+ * How Cube itself looks: the app's flat mark, or a cube that turns like its teammates'; plain
+ * or in a gradient; with a figure on every tile or once across its front, or none. Seen wherever Cube is.
+ */
+function CubeLookSection({ agent }: { agent: AgentDef }) {
+  const look = useCube((s) => s.settings.cubeLook) ?? {};
+  const setSetting = useCube((s) => s.setSetting);
+  const set = (patch: Partial<NonNullable<typeof look>>) => setSetting("cubeLook", { ...look, ...patch });
+  const fill = look.fill ?? "mono";
+  // What the pickers show: the person's own colors, or, before they picked any, those of the fill in use.
+  const stops = FILLS.find((f) => f.id === fill)?.stops;
+  const picked: [string, string, string] = look.colors ?? (stops ? [stops[1], stops[0], stops[2]] : FIRST_COLORS);
+  const shape = look.shape ?? "mark";
+  const spread = look.spread ?? "face";
+  const cell = (on: boolean) => cn("flex size-11 flex-none items-center justify-center rounded-xl border", on ? "border-primary bg-primary/10" : "border-transparent bg-secondary hover:bg-accent");
+  const seg = (on: boolean) => cn("h-7 rounded-lg px-3 text-[13px] font-medium text-muted-foreground", on && "bg-background font-semibold text-foreground shadow-sm");
+  const label = "text-xs font-semibold text-muted-foreground";
+  return (
+    <Section title="Cube's look">
+      <div className="flex flex-wrap items-start gap-x-6 gap-y-4">
+        <Cube color={agent.color} status="idle" size={96} prop={null} lively />
+        <div className="flex min-w-[240px] flex-1 flex-col gap-3">
+          <div className="flex flex-col gap-1.5">
+            <span className={label}>Shape</span>
+            <div className="flex w-fit rounded-[10px] bg-secondary p-0.5" role="group" aria-label="Shape">
+              <button type="button" aria-pressed={shape === "mark"} className={seg(shape === "mark")} onClick={() => set({ shape: "mark" })}>The logo</button>
+              <button type="button" aria-pressed={shape === "cube"} className={seg(shape === "cube")} onClick={() => set({ shape: "cube" })}>A cube that turns</button>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className={label}>Color</span>
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label="Color">
+              {FILLS.map((f) => (
+                <button type="button" key={f.id} aria-pressed={fill === f.id} aria-label={f.name} title={f.name} className={cell(fill === f.id)} onClick={() => set({ fill: f.id })}>
+                  <CubeMark size={30} look={{ fill: f.id }} />
+                </button>
+              ))}
+            </div>
+            {/* Its own colors, one a face, as for any other cube. Picking one puts them on in place of a ready-made fill. */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              {FACES.map((face, i) => (
+                <label key={face} className="flex items-center gap-2 text-[13px] font-medium">
+                  <input type="color" aria-label={`${face} color`} value={picked[i]} onChange={(e) => set({ fill: CUSTOM_FILL, colors: picked.map((c, j) => (j === i ? e.target.value : c)) as [string, string, string] })} className={cn("size-8 cursor-pointer rounded-lg border bg-transparent p-0.5", fill === CUSTOM_FILL && "border-primary")} />
+                  {face}
+                </label>
+              ))}
+              {fill !== CUSTOM_FILL && look.colors && <button type="button" className={pill} onClick={() => set({ fill: CUSTOM_FILL })}>Use these colors</button>}
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className={label}>Figure</span>
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label="Figure">
+              <button type="button" aria-pressed={!look.symbol} aria-label="None" title="None" className={cn(cell(!look.symbol), "text-[13px] text-muted-foreground")} onClick={() => set({ symbol: undefined })}>
+                <span aria-hidden="true" data-notranslate>–</span>
+              </button>
+              {SYMBOLS.map((x) => (
+                <button type="button" key={x.id} aria-pressed={look.symbol === x.id} aria-label={x.name} title={x.name} className={cell(look.symbol === x.id)} onClick={() => set({ symbol: x.id })}>
+                  <CubeMark size={30} look={{ fill, symbol: x.id, spread }} />
+                </button>
+              ))}
+            </div>
+            {look.symbol && (
+              <div className="flex w-fit rounded-[10px] bg-secondary p-0.5" role="group" aria-label="Where the figure goes">
+                <button type="button" aria-pressed={spread === "face"} className={seg(spread === "face")} onClick={() => set({ spread: "face" })}>Across the front</button>
+                <button type="button" aria-pressed={spread === "tiles"} className={seg(spread === "tiles")} onClick={() => set({ spread: "tiles" })}>On every tile</button>
+              </div>
+            )}
+          </div>
+          <span className="text-[13px] text-muted-foreground">Cube wears it everywhere: in the sidebar, on Home and beside what it says. The app's icon stays as it is.</span>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+/** What the role's cube holds while it works. It is only a look, like the colors. */
+function CubeProp({ agent }: { agent: AgentDef }) {
+  const mine = useCube((s) => s.outfits[agent.id]);
+  const setOutfit = useCube((s) => s.setOutfit);
+  const held = useCube((s) => propOf(agent, s.outfits));
+  return (
+    <Section title="What it holds">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
+        <Cube color={agent.color} status="idle" size={72} lively />
+        <div className="flex min-w-[240px] flex-1 flex-col gap-2">
+          <PropPicker value={held ?? "none"} onChange={(id) => setOutfit(agent.id, id)} />
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[13px] text-muted-foreground">It uses it while it works, as its layers turn.</span>
+            {mine && <button type="button" className={pill} onClick={() => setOutfit(agent.id, undefined)}>Use its own</button>}
+          </div>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 /** What the role has done so far, counted from its messages in this app. */
 function Work({ agent }: { agent: AgentDef }) {
   const messages = useCube((s) => s.messages);
@@ -366,6 +497,8 @@ export function AgentProfile() {
   const engine = useEngine(agent);
   const live = useCube((s) => s.live[agent.id]);
   const setActive = useCube((s) => s.setActive);
+  const turning = useCube((s) => s.settings.cubeLook?.shape === "cube");
+  const lang = useCube((s) => s.settings.lang);
   const [harness, setHarness] = useState<Harness>();
 
   useEffect(() => {
@@ -383,16 +516,29 @@ export function AgentProfile() {
         <header className="flex items-center gap-5 pt-2">
           <Cube color={agent.color} status={live?.status ?? "idle"} size={112} />
           <div className="min-w-0 flex-1">
-            <h1 className="font-heading text-[24px] font-bold leading-tight tracking-[-0.03em]">{agent.name}</h1>
+            <h1 className="font-heading text-[24px] font-bold leading-tight tracking-[-0.03em]">{nameIn(agent, lang)}</h1>
             <p className="text-muted-foreground">{live?.statement || agent.role}</p>
+            <RunsOnLine agent={agent} />
             <p className="mt-1 max-w-[460px] text-[13px] text-muted-foreground">{agent.brief.replace(/^You /, "I ").replace(/\byou\b/g, "I")}</p>
           </div>
-          <button type="button" className="h-9 flex-none rounded-full bg-primary px-4 font-semibold text-primary-foreground" onClick={() => setActive(`dm-${agent.id}`)}>
+          <button type="button" className="h-9 flex-none rounded-full bg-primary px-4 font-semibold text-primary-foreground" onClick={() => setActive(agent.id === ROUTER ? CUBE_DM : `dm-${agent.id}`)}>
             Message
           </button>
         </header>
-        <CubeColors agent={agent} />
+        {agent.id === ROUTER ? (
+          <>
+            <CubeLookSection agent={agent} />
+            {/* The flat mark holds nothing. As a cube that turns, Cube holds something like any other cube, and the person picks what. */}
+            {turning && <CubeProp agent={agent} />}
+          </>
+        ) : (
+          <>
+            <CubeColors agent={agent} />
+            <CubeProp agent={agent} />
+          </>
+        )}
         <RunsOn agent={agent} engine={engine} harness={harness} />
+        <PlanLeft engine={engine} />
         <Work agent={agent} />
         <TrustDial agent={agent} engine={engine} />
         <Learned agent={agent} />
