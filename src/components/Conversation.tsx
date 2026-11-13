@@ -1,14 +1,17 @@
 import { useMemo, useState, useEffect } from "react";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { inTauri } from "@/agents/runner";
 import { setSeparate, stopAgent, undoRestore } from "@/agents/orchestrator";
 import { agentById, type AgentDef } from "@/agents/types";
 import { EngineLabel, Face } from "@/components/bits";
 import { ChannelPeople } from "@/components/ChannelPeople";
 import { refreshMembers } from "@/team";
 import { Composer } from "@/components/Composer";
-import { BranchIcon, CloseIcon, HashIcon, LockIcon, PinIcon, StageIcon, PeopleIcon } from "@/components/icons";
+import { BranchIcon, CloseIcon, HashIcon, LockIcon, MoreIcon, OpenIcon, PinIcon, StageIcon, PeopleIcon } from "@/components/icons";
 import { authorName } from "@/agents/types";
-import { MessageItem, ThreadSummary } from "@/components/MessageItem";
+import { MessageItem } from "@/components/MessageItem";
 import { ChatContainerContent, ChatContainerRoot } from "@/components/ui/chat-container";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ScrollButton } from "@/components/ui/scroll-button";
 import { Cube, CubeStill } from "@/cube/Cube";
 import { cn } from "@/lib/utils";
@@ -38,75 +41,117 @@ function Header({ conv, paneOpen }: { conv: Conv; paneOpen: boolean }) {
     window.addEventListener("cube:invite", open);
     return () => window.removeEventListener("cube:invite", open);
   }, [dm, inTeam, conv.person]);
+
+  const canInvite = !dm && inTeam && !conv.person;
+  const canSeparate = !dm && members.length > 1;
+  const folder = inTauri && Boolean(conv.dir);
+  const copiesAbout = separate
+    ? "Separate copies are on: each cube works in its own copy of this folder, and you merge what you want. Click to turn off."
+    : "Separate copies: let each cube work in its own copy of this folder, so cubes working at the same time never write over each other.";
+  const toggleCopies = () => void setSeparate(conv.id, !separate).then((p) => setProblem(p ?? ""));
+  // The header holds the name and what is looked at every day. Everything else is one click away, without a filled button of its own.
+  const ghost = "flex h-8 flex-none items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-popup-open:bg-accent data-popup-open:text-foreground";
+  // A badge gives way before it is cut: with little room its words end in an ellipsis.
+  const badge = "flex h-[18px] min-w-0 items-center gap-1 rounded-full px-1.5 text-[11px] font-semibold [&>svg]:flex-none";
+  const title = "truncate font-heading text-[17px] font-bold leading-tight tracking-[-0.02em]";
   return (
-    <header className="flex min-h-[62px] items-center gap-2.5 border-b px-5 py-2.5" data-tauri-drag-region>
-      {dm ? <Cube color={dm.color} status={live[dm.id]?.status ?? "idle"} size={40} /> : conv.person ? (
-        <Face pubkey={conv.person.pubkey} name={conv.name} size={36} />
-      ) : <HashIcon className="text-muted-foreground" width={22} height={22} />}
-      {/* The name keeps a width of its own: with people, Invite and Copies beside it, it is the cubes on the right that give way. */}
-      <div className="min-w-[112px] flex-1">
-        <h1 className="truncate font-heading text-[19px] font-bold leading-tight tracking-[-0.02em]">{conv.name}</h1>
-        {dm ? (
-          <p className="flex items-center gap-1 text-xs text-muted-foreground">
-            {dm.role} · runs on <EngineLabel agent={dm} />
-          </p>
-        ) : (
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            {/* Who sees the channel sits under its name, so the name itself is never squeezed out. */}
-            {conv.shared && !conv.person && (
-              <button type="button" className="flex h-[18px] flex-none items-center gap-1 rounded-full bg-primary/15 px-1.5 text-[11px] font-semibold text-primary" title={conv.shared.private ? "Only the people invited into this channel see it. Cubes here ask before they run anything." : "What is said here goes to everyone in your team. Cubes here ask before they run anything."} onClick={() => setPeople(true)}>
-                {conv.shared.private ? <><LockIcon width={11} height={11} /> Private</> : <><PeopleIcon width={11} height={11} /> Shared with team</>}
-              </button>
-            )}
-            <span className="truncate">{conv.person ? "Direct message. Your cubes answer here only when you name one with @." : <>{members.map((m) => m.name).join(", ")} and you</>}</span>
-          </p>
-        )}
-      </div>
-      {here.length > 0 && (
-        <button type="button" className="flex h-8 flex-none items-center gap-1.5 rounded-full bg-secondary pl-1.5 pr-2.5 text-[13px] font-semibold" title={`${here.map((m) => m.name).join(", ")}`} aria-label={`People in this channel: ${here.map((m) => m.name).join(", ")}`} onClick={() => setPeople(true)}>
-          <span className="flex -space-x-1.5" aria-hidden="true">
-            {here.slice(0, 3).map((m) => (
-              <Face key={m.pubkey} pubkey={m.pubkey} name={m.name} size={22} className="ring-2 ring-secondary" />
-            ))}
-          </span>
-          <span className="tabular-nums" data-notranslate>{here.length}</span>
+    <header className="flex min-h-[52px] items-center gap-2 border-b px-5 py-2" data-tauri-drag-region>
+      {/* The name keeps a width of its own: what stands beside it is what gives way. */}
+      {dm ? (
+        <button type="button" className="-ml-1.5 flex min-w-0 max-w-[50%] flex-none items-center gap-2 rounded-lg px-1.5 py-1 outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring" title="Open profile" onClick={() => openProfile(dm.id)}>
+          <Cube color={dm.color} status={live[dm.id]?.status ?? "idle"} size={28} />
+          <h1 className={title}>{conv.name}</h1>
         </button>
-      )}
-      {!dm && inTeam && !conv.person && (
-        <button type="button" className="flex h-8 flex-none items-center gap-1.5 rounded-full bg-secondary px-3 text-[13px] font-semibold" title="Share this channel and invite people into it" onClick={() => setPeople(true)}>
-          <PeopleIcon width={15} height={15} /> Invite
-        </button>
-      )}
-      {!dm && <ChannelPeople conv={conv} open={people} onOpenChange={setPeople} />}
-      {!dm && members.length > 1 && (
-        <button
-          type="button"
-          aria-pressed={separate}
-          title={problem || (separate ? "Separate copies are on: each cube works in its own copy of this folder, and you merge what you want. Click to turn off." : "Separate copies: let each cube work in its own copy of this folder, so cubes working at the same time never write over each other.")}
-          className={cn("flex h-8 flex-none items-center gap-1.5 rounded-full px-3 text-[13px] font-semibold", separate ? "bg-foreground text-background" : "bg-secondary", problem && "text-destructive")}
-          onClick={() => void setSeparate(conv.id, !separate).then((p) => setProblem(p ?? ""))}
-        >
-          <BranchIcon width={15} height={15} /> {separate ? "Separate copies" : "Copies"}
-        </button>
-      )}
-      {!dm && (
-        <div className="flex min-w-0 shrink -space-x-2 overflow-hidden">
-          {members.map((m) => (
-            <button type="button" key={m.id} className="flex-none rounded-xl" aria-label={`Open ${m.name}'s profile`} title={m.name} onClick={() => openProfile(m.id)}>
-              <CubeStill color={m.color} size={30} />
-            </button>
-          ))}
+      ) : (
+        <div className="flex min-w-0 max-w-[50%] flex-none items-center gap-2">
+          {conv.person
+            ? <Face pubkey={conv.person.pubkey} name={conv.name} size={26} />
+            : conv.shared?.private
+              ? <LockIcon className="flex-none text-muted-foreground" width={18} height={18} />
+              : <HashIcon className="flex-none text-muted-foreground" width={18} height={18} />}
+          <h1 className={title}>{conv.name}</h1>
         </div>
       )}
-      {dm && (
-        <button type="button" className="flex h-8 items-center rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={() => openProfile(dm.id)}>
-          Profile
+      <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden whitespace-nowrap text-xs text-muted-foreground">
+        {dm && <span className="flex min-w-0 items-center gap-1">{dm.role} · runs on <EngineLabel agent={dm} /></span>}
+        {/* Who sees the channel sits beside its name, so it is never out of sight. */}
+        {conv.shared && !conv.person && (
+          <button type="button" className={cn(badge, "bg-primary/15 text-primary")} title={conv.shared.private ? "Only the people invited into this channel see it. Cubes here ask before they run anything." : "What is said here goes to everyone in your team. Cubes here ask before they run anything."} onClick={() => setPeople(true)}>
+            {conv.shared.private ? <><LockIcon width={11} height={11} /> <span className="truncate">Private</span></> : <><PeopleIcon width={11} height={11} /> <span className="truncate">Shared with team</span></>}
+          </button>
+        )}
+        {/* Separate copies change where the cubes write, so while they are on the header says so. */}
+        {separate && (
+          <button type="button" className={cn(badge, "bg-secondary text-foreground")} title={copiesAbout} onClick={toggleCopies}>
+            <BranchIcon width={11} height={11} /> <span className="truncate">Separate copies</span>
+          </button>
+        )}
+        {conv.person && <span className="truncate">Direct message. Your cubes answer here only when you name one with @.</span>}
+        {problem && <span className="truncate text-destructive" role="alert" title={problem} data-notranslate>{problem}</span>}
+      </div>
+      {!dm && (
+        <DropdownMenu>
+          <DropdownMenuTrigger className={ghost} aria-label="Members of this channel" title="Members">
+            <PeopleIcon width={16} height={16} />
+            <span className="tabular-nums" data-notranslate>{members.length + here.length}</span>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Cubes</DropdownMenuLabel>
+              {members.map((m) => (
+                <DropdownMenuItem key={m.id} onClick={() => openProfile(m.id)}>
+                  <CubeStill color={m.color} size={22} /> {m.name}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuGroup>
+            {here.length > 0 && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>People</DropdownMenuLabel>
+                  {here.map((m) => (
+                    <DropdownMenuItem key={m.pubkey} onClick={() => setPeople(true)}>
+                      <Face pubkey={m.pubkey} name={m.name} size={20} className="mx-px" /> <span className="truncate" data-notranslate>{m.name}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </>
+            )}
+            {canInvite && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => setPeople(true)}>
+                  <PeopleIcon width={16} height={16} className="mx-[3px]" /> {conv.shared ? "Invite people…" : "Share and invite…"}
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+      {!dm && <ChannelPeople conv={conv} open={people} onOpenChange={setPeople} />}
+      {!paneOpen && (
+        <button type="button" className={ghost} aria-label="Show Stage" title="Show Stage" onClick={() => setStage(conv.id, "open")}>
+          <StageIcon width={16} height={16} />{fileCount > 0 && <span className="tabular-nums" data-notranslate>{fileCount}</span>}
         </button>
       )}
-      {!paneOpen && (
-        <button type="button" className="flex h-8 items-center gap-1.5 rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={() => setStage(conv.id, "open")}>
-          <StageIcon width={15} height={15} /> Stage{fileCount > 0 && <span className="text-muted-foreground tabular-nums">{fileCount}</span>}
-        </button>
+      {(canSeparate || folder) && (
+        <DropdownMenu>
+          <DropdownMenuTrigger className={cn(ghost, "px-1.5")} aria-label="More" title="More">
+            <MoreIcon width={18} height={18} />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            {canSeparate && (
+              <DropdownMenuCheckboxItem checked={separate} title={copiesAbout} closeOnClick onClick={toggleCopies}>
+                <BranchIcon width={16} height={16} /> Separate copies
+              </DropdownMenuCheckboxItem>
+            )}
+            {folder && (
+              <DropdownMenuItem onClick={() => void openPath(conv.dir).catch(() => undefined)}>
+                <OpenIcon width={16} height={16} /> Show folder in Finder
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       )}
     </header>
   );
@@ -221,18 +266,10 @@ export function Conversation() {
       <Header conv={conv} paneOpen={paneOpen} />
       <Pinned pinned={pinned} />
       <ChatContainerRoot className="relative min-h-0 flex-1" key={conv.id}>
-        <ChatContainerContent className={cn("min-h-full gap-2 py-4", column)}>
+        <ChatContainerContent className={cn("min-h-full gap-3.5 py-4", column)}>
           {roots.length === 0 && <Empty conv={conv} />}
-          {roots.map((m) => {
-            const rs = replies.get(m.id) ?? [];
-            return (
-              <div className="flex flex-col gap-1" key={m.id}>
-                <MessageItem msg={m} />
-                {/* Replies live in the thread: the conversation shows that there are some, and the panel beside it shows them. */}
-                <ThreadSummary root={m} replies={rs} />
-              </div>
-            );
-          })}
+          {/* Replies live in the thread: the message says that there are some, and the panel beside it shows them. */}
+          {roots.map((m) => <MessageItem msg={m} replies={replies.get(m.id)} key={m.id} />)}
         </ChatContainerContent>
         <div className="pointer-events-none absolute inset-x-0 bottom-2 flex justify-center">
           <ScrollButton className="pointer-events-auto shadow-sm" />
@@ -264,9 +301,9 @@ export function ThreadPanel() {
   if (!root) return null;
   return (
     <section className="flex min-h-0 min-w-0 flex-col rounded-r-[22px] border bg-background" aria-label="Thread">
-      <header className="flex min-h-[62px] items-center gap-2 border-b px-5 py-2.5" data-tauri-drag-region>
+      <header className="flex min-h-[52px] items-center gap-2 border-b px-5 py-2" data-tauri-drag-region>
         <div className="min-w-0 flex-1">
-          <h2 className="font-heading text-[19px] font-bold leading-tight tracking-[-0.02em]">Thread</h2>
+          <h2 className="font-heading text-[17px] font-bold leading-tight tracking-[-0.02em]">Thread</h2>
           <p className="text-xs text-muted-foreground">{conv.kind === "dm" ? conv.name : `#${conv.name}`}</p>
         </div>
         <button type="button" className="flex h-8 items-center gap-1.5 rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={() => openThread(undefined)}>
@@ -274,7 +311,7 @@ export function ThreadPanel() {
         </button>
       </header>
       <ChatContainerRoot className="min-h-0 flex-1" key={root.id}>
-        <ChatContainerContent className="gap-1 py-4">
+        <ChatContainerContent className="gap-3 py-4">
           <MessageItem msg={root} inPanel />
           <div className="mx-5 my-2 flex items-center gap-3 text-xs text-muted-foreground">
             {replies.length === 1 ? "1 reply" : `${replies.length} replies`}

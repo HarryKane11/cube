@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 import { useCube, type Conv } from "@/state/store";
 import { showUpdate, useUpdate } from "@/update";
 
-const WORD: Record<string, string> = { thinking: "thinking", working: "working", needs: "needs you", stuck: "stuck", done: "done" };
+const WORD: Record<string, string> = { needs: "needs you", stuck: "stuck" };
 
 /** Every shortcut with what it does. */
 export function ShortcutList() {
@@ -186,17 +186,18 @@ function RowButton({ conv, rail }: { conv: Conv; rail?: boolean }) {
       type="button"
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex w-full items-center gap-2 rounded-[10px] px-2 text-left",
-        agent || conv.person ? "min-h-[40px]" : "min-h-[32px]",
+        // A cube, a teammate and a channel are all one line of the same height: the list reads as one column.
+        "flex min-h-[32px] w-full items-center gap-2 rounded-[10px] px-2 text-left",
         active ? "bg-secondary font-semibold" : "hover:bg-accent",
         unread > 0 && "font-semibold",
       )}
       onClick={() => setActive(conv.id)}
     >
-      {agent ? <Cube color={agent.color} status={status} size={32} /> : conv.person ? <Initial name={conv.name} size={28} pubkey={conv.person.pubkey} /> : conv.shared?.private ? <LockIcon className="mx-1.5 text-muted-foreground" width={16} height={16} /> : <HashIcon className="mx-1.5 text-muted-foreground" width={16} height={16} />}
+      {agent ? <span className="mx-0.5 flex-none"><Cube color={agent.color} status={status} size={24} /></span> : conv.person ? <Face pubkey={conv.person.pubkey} name={conv.name} size={20} className="mx-1" /> : conv.shared?.private ? <LockIcon className="mx-1.5 text-muted-foreground" width={16} height={16} /> : <HashIcon className="mx-1.5 text-muted-foreground" width={16} height={16} />}
       <span className="min-w-0 flex-1 truncate">{conv.name}</span>
       {!agent && busy && <span className="size-1.5 animate-pulse rounded-full bg-primary" aria-label="Agents are working here" />}
-      {agent && WORD[status] && !unread && (
+      {/* A cube at work shows it by moving. Words are kept for when it waits on the person or cannot go on. */}
+      {agent && (status === "needs" || status === "stuck") && !unread && (
         <span className={cn("text-xs font-normal text-muted-foreground", status === "needs" && "font-semibold text-primary", status === "stuck" && "font-semibold text-destructive")}>
           {WORD[status]}
         </span>

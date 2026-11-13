@@ -15,6 +15,7 @@ function Svg({ children, ...props }: SVGProps<SVGSVGElement>) {
 type P = SVGProps<SVGSVGElement>;
 
 export const HashIcon = (p: P) => <Svg {...p}><path d="M7.5 3.5 6 16.5M14 3.5l-1.5 13M3.5 7.5h13M3 12.5h13" /></Svg>;
+export const MoreIcon = (p: P) => <Svg {...p}><circle cx="4.5" cy="10" r="0.9" fill="currentColor" /><circle cx="10" cy="10" r="0.9" fill="currentColor" /><circle cx="15.5" cy="10" r="0.9" fill="currentColor" /></Svg>;
 export const PlusIcon = (p: P) => <Svg {...p}><path d="M10 4v12M4 10h12" /></Svg>;
 export const SearchIcon = (p: P) => <Svg {...p}><circle cx="9" cy="9" r="5.25" /><path d="m13 13 3.5 3.5" /></Svg>;
 export const SendIcon = (p: P) => <Svg {...p}><path d="M10 16V4.5M5 9l5-5 5 5" /></Svg>;

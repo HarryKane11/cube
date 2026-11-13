@@ -131,7 +131,6 @@
 .md h1, .md h2, .md h3 { font-family: var(--font-heading); letter-spacing: -0.02em; line-height: 1.25; font-weight: 700; margin: 0.9em 0 0.4em; }
 .md h1 { font-size: 1.3em; } .md h2 { font-size: 1.15em; } .md h3 { font-size: 1.05em; }
 .at { color: var(--primary); font-weight: 600; background: color-mix(in srgb, var(--primary) 12%, transparent); padding: 0 4px; border-radius: 5px; }
-.mine .at { color: var(--primary-foreground); background: color-mix(in srgb, #fff 22%, transparent); }
 .caret .md > div:last-child > :last-child::after { content: ""; display: inline-block; width: 2px; height: 1em; background: var(--primary); margin-left: 2px; vertical-align: -2px; animation: caret 1s steps(1) infinite; }
 @keyframes caret { 50% { opacity: 0; } }
 
@@ -252,5 +251,7 @@
   .rolling-out { display: none; }
 }
 
-/* What is said in a conversation can be set larger or smaller than the rest of the app. */
-.chat-text { font-size: var(--chat-size, inherit); }
+/* What is said in a conversation is read at length, so it is set a step larger and more open than the
+   interface around it. The person can still pick a size of their own. */
+.chat-text { font-size: var(--chat-size, 15px); line-height: 1.6; }
+.chat-text .md p, .chat-text .md ul, .chat-text .md ol { margin-bottom: 10px; }

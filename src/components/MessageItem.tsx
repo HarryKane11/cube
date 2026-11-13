@@ -27,7 +27,7 @@ function Reactions({ msg }: { msg: Msg }) {
   const entries = Object.entries(msg.reactions ?? {});
   if (!entries.length) return null;
   return (
-    <div className="flex flex-wrap gap-1">
+    <div className="flex flex-none flex-wrap gap-1">
       {entries.map(([emoji, who]) => (
         <button
           type="button"
@@ -35,8 +35,8 @@ function Reactions({ msg }: { msg: Msg }) {
           aria-pressed={who.includes("you")}
           title={who.map(authorName).join(", ")}
           className={cn(
-            "flex h-6 items-center gap-1 rounded-full border bg-background px-2 text-xs tabular-nums",
-            who.includes("you") && "border-primary bg-primary/10 text-primary",
+            "flex h-[22px] items-center gap-1 rounded-full bg-secondary px-2 text-xs tabular-nums text-foreground",
+            who.includes("you") && "bg-primary/10 text-primary",
           )}
           onClick={() => react(msg.id, emoji, "you")}
         >
@@ -83,19 +83,15 @@ function Sent({ msg }: { msg: Msg }) {
   );
 }
 
-function Toolbar({ msg, mine, canThread, onRestore, onEdit }: { msg: Msg; mine: boolean; canThread: boolean; onRestore?: () => void; onEdit?: () => void }) {
+function Toolbar({ msg, canThread, onRestore, onEdit }: { msg: Msg; canThread: boolean; onRestore?: () => void; onEdit?: () => void }) {
   const react = useCube((s) => s.react);
   const patchMsg = useCube((s) => s.patchMsg);
   const openThread = useCube((s) => s.openThread);
   const deleteMsg = useCube((s) => s.deleteMsg);
   const tool = "flex size-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground";
   return (
-    <div
-      className={cn(
-        "absolute -top-3 z-10 hidden items-center rounded-xl border bg-popover p-0.5 shadow-sm group-hover:flex group-focus-within:flex",
-        mine ? "right-4" : "left-14",
-      )}
-    >
+    // Every message reads from one left edge, so the bar always sits at the right, clear of the text.
+    <div className="absolute -top-3 right-4 z-10 hidden items-center rounded-xl border bg-popover p-0.5 shadow-sm group-hover:flex group-focus-within:flex">
       {QUICK.map((e) => (
         <button type="button" key={e} className={tool} aria-label={`React with ${e}`} onClick={() => react(msg.id, e, "you")}>
           <span className="text-[15px] leading-none">{e}</span>
@@ -329,9 +325,11 @@ interface Props {
   compact?: boolean;
   /** Hide the thread button, for messages already shown inside the thread panel. */
   inPanel?: boolean;
+  /** The replies in this message's thread, when it is shown in the conversation. */
+  replies?: Msg[];
 }
 
-export function MessageItem({ msg, compact, inPanel }: Props) {
+export function MessageItem({ msg, compact, inPanel, replies }: Props) {
   const mine = msg.author === "you";
   const agent = agentById(msg.author);
   const status = useCube((s) => s.live[msg.author]?.status ?? "idle") as Status;
@@ -344,7 +342,7 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
   const steps = msg.steps ?? drafted?.steps ?? [];
   // The Router's line is a note about where a request went, not a reply: it is shown small.
   const slim = agent?.id === ROUTER && !msg.error;
-  const size = compact ? 30 : 38;
+  const size = compact ? 26 : 32;
   const lastAct = msg.acts?.[msg.acts.length - 1];
   // Only a message that just arrived slides in. History is drawn in place, and the slide never
   // hides the text: a paused animation (window in the background) must not leave it invisible.
@@ -376,10 +374,12 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
     !msg.streaming && { label: "Delete message", danger: true, onSelect: () => deleteMsg(msg.id) },
   ];
   const waitingCalls = msg.decided ? decisions.filter((d) => d.msgId === msg.id && d.state === "new").length : 0;
+  const hasSteps = !msg.streaming && Boolean(msg.acts?.length);
+  const hasFoot = hasSteps || Boolean(replies?.length) || Object.keys(msg.reactions ?? {}).length > 0 || Boolean(agent && (msg.noted || msg.decided));
 
   return (
       <RightClick items={menu}>
-      <div data-mid={msg.id} className={cn("group relative flex items-start gap-1.5 rounded-xl px-4 py-0.5", fresh && "msg-in", mine && "mine flex-row-reverse", compact && !mine && "pl-12")}>
+      <div data-mid={msg.id} className={cn("group relative flex items-start gap-2 rounded-xl px-4 py-0.5", fresh && "msg-in", mine && "flex-row-reverse", compact && !mine && "pl-12")}>
         {msg.from && (msg.from.agent ? (
           // A teammate's cube is drawn as the cube it is, with its owner on the corner, so it is never taken for one of this person's own.
           <span className="relative flex-none" style={{ width: size, height: size }} title={msg.from.name} aria-hidden="true">
@@ -392,7 +392,8 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
             {msg.streaming ? <Cube color={agent.color} status={status} size={size} /> : <CubeStill color={agent.color} size={size} />}
           </button>
         )}
-        <div className={cn("flex min-w-0 max-w-[84%] flex-col gap-1", mine && "items-end")}>
+        {/* What a cube or a teammate says is plain text in one column. Only the person's own words sit in a bubble. */}
+        <div className={cn("flex min-w-0 flex-col gap-1", mine ? "max-w-[84%] items-end" : "flex-1")}>
           <div className="flex items-baseline gap-1.5 px-1 text-xs text-muted-foreground">
             {!mine && (msg.from
               ? <span className="font-semibold text-foreground" data-notranslate title={`Signed by ${msg.from.pubkey.slice(0, 12)}…`}>{msg.from.agent ? (lang === "ko" ? `${msg.from.name}의 ${msg.from.agent}` : `${msg.from.name}'s ${msg.from.agent}`) : msg.from.name}</span>
@@ -436,9 +437,9 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
               className={cn(
                 "selectable [overflow-wrap:anywhere]",
                 !slim && "chat-text",
-                slim ? "px-1 text-[13px] text-muted-foreground" : "rounded-[18px] px-3.5 py-2",
-                mine ? "rounded-br-md bg-primary text-primary-foreground" : !slim && "rounded-bl-md bg-muted",
-                msg.aside && (mine ? "bg-primary/75" : "border border-dashed bg-transparent"),
+                slim ? "px-1 text-[13px] text-muted-foreground" : mine ? "rounded-[18px] bg-muted px-3.5 py-2" : "px-1",
+                // Something said on the side changes no files: it is set apart with a dashed line, not a color.
+                msg.aside && (mine ? "border border-dashed bg-transparent" : "ml-1 border-l-2 border-dashed pl-3"),
                 msg.streaming && text && "caret",
               )}
             >
@@ -489,43 +490,47 @@ export function MessageItem({ msg, compact, inPanel }: Props) {
 
           {agent && msg.branch && <BranchCard msg={msg} name={agent.name} />}
 
-          {msg.error && <div className="selectable whitespace-pre-wrap rounded-[18px] rounded-bl-md bg-destructive/10 px-3.5 py-2 text-[13px] text-destructive">{msg.error}</div>}
+          {msg.error && <div className="selectable whitespace-pre-wrap rounded-xl bg-destructive/10 px-3.5 py-2 text-[13px] text-destructive">{msg.error}</div>}
 
-          {!msg.streaming && Boolean(msg.acts?.length) && (
-            <Steps defaultOpen={false} className="px-1">
-              <StepsTrigger className="text-xs text-muted-foreground">
-                {msg.acts!.length === 1 ? "1 step" : `${msg.acts!.length} steps`}
-                {msg.took ? ` · ${spanOf(msg.took)}` : ""}
-                {msg.usage?.cost ? ` · $${msg.usage.cost.toFixed(msg.usage.cost < 0.1 ? 3 : 2)}` : ""}
-              </StepsTrigger>
-              <StepsContent>
-                {msg.acts!.map((a, i) => <StepsItem className="text-xs" key={i}>{a.label}</StepsItem>)}
-              </StepsContent>
-            </Steps>
+          {/* Everything that hangs under a message shares one quiet line: what waits on the person first, then reactions, the thread, and how the answer was made. */}
+          {hasFoot && (
+            <div className={cn("flex w-full flex-wrap items-center gap-x-2.5 gap-y-1 px-1 text-xs text-muted-foreground", mine && "justify-end")}>
+              {agent && Boolean(msg.noted) && (
+                <button type="button" className="flex flex-none items-center rounded-full bg-primary/10 px-2 py-0.5 font-semibold text-primary" onClick={() => openProfile(agent.id)}>
+                  {msg.noted === 1 ? "Proposed a note to remember" : `Proposed ${msg.noted} notes to remember`} · Review
+                </button>
+              )}
+              {agent && Boolean(msg.decided) && (
+                <button type="button" className={cn("flex flex-none items-center rounded-full px-2 py-0.5 font-semibold", waitingCalls ? "bg-primary/10 text-primary" : "bg-secondary")} onClick={openInbox}>
+                  {msg.decided === 1 ? "Made 1 call on its own" : `Made ${msg.decided} calls on its own`}{waitingCalls ? " · Review" : ""}
+                </button>
+              )}
+              <Reactions msg={msg} />
+              {replies && <ThreadSummary root={msg} replies={replies} />}
+              {hasSteps && (
+                // The row's own line holds only the count and the time. The steps, and what they cost, open below it.
+                <Steps defaultOpen={false} className="contents">
+                  <StepsTrigger className="w-auto flex-none gap-0.5 text-xs [&_svg]:size-3.5">
+                    {msg.acts!.length === 1 ? "1 step" : `${msg.acts!.length} steps`}
+                    {msg.took ? ` · ${spanOf(msg.took)}` : ""}
+                  </StepsTrigger>
+                  <StepsContent className="basis-full text-left">
+                    {msg.acts!.map((a, i) => <StepsItem className="text-xs" key={i}>{a.label}</StepsItem>)}
+                    {msg.usage?.cost ? <StepsItem className="text-xs">{`Cost · $${msg.usage.cost.toFixed(msg.usage.cost < 0.1 ? 3 : 2)}`}</StepsItem> : null}
+                  </StepsContent>
+                </Steps>
+              )}
+            </div>
           )}
-
-          {agent && Boolean(msg.noted) && (
-            <button type="button" className="mx-1 flex w-fit items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-semibold text-primary" onClick={() => openProfile(agent.id)}>
-              {msg.noted === 1 ? "Proposed a note to remember" : `Proposed ${msg.noted} notes to remember`} · Review
-            </button>
-          )}
-
-          {agent && Boolean(msg.decided) && (
-            <button type="button" className={cn("mx-1 flex w-fit items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold", waitingCalls ? "bg-primary/10 text-primary" : "bg-secondary text-muted-foreground")} onClick={openInbox}>
-              {msg.decided === 1 ? "Made 1 call on its own" : `Made ${msg.decided} calls on its own`}{waitingCalls ? " · Review" : ""}
-            </button>
-          )}
-
-          <Reactions msg={msg} />
         </div>
-        <Toolbar msg={msg} mine={mine} canThread={!inPanel} onRestore={mine && msg.checkpoint ? () => setRestoring("ask") : undefined} onEdit={mine && !msg.streaming ? () => setEditing(msg.text) : undefined} />
+        <Toolbar msg={msg} canThread={!inPanel} onRestore={mine && msg.checkpoint ? () => setRestoring("ask") : undefined} onEdit={mine && !msg.streaming ? () => setEditing(msg.text) : undefined} />
       </div>
       </RightClick>
   );
 }
 
-/** Under a message with replies: who answered, how many, and a way into the thread. */
-export function ThreadSummary({ root, replies }: { root: Msg; replies: Msg[] }) {
+/** On the line under a message with replies: who answered, how many, and a way into the thread. */
+function ThreadSummary({ root, replies }: { root: Msg; replies: Msg[] }) {
   const openThread = useCube((s) => s.openThread);
   if (!replies.length) return null;
   const authors = [...new Set(replies.map((r) => r.author))].slice(0, 4);
@@ -536,13 +541,13 @@ export function ThreadSummary({ root, replies }: { root: Msg; replies: Msg[] }) 
   return (
     <button
       type="button"
-      className={cn("mx-4 flex w-fit items-center gap-1.5 rounded-full py-0.5 pl-1 pr-2.5 text-[13px] hover:bg-accent", root.author === "you" ? "ml-auto" : "ml-14")}
+      className="-mx-1 flex flex-none items-center gap-1.5 rounded-full px-1 py-0.5 text-xs hover:bg-accent"
       onClick={() => openThread(root.id)}
     >
-      <span className="flex -space-x-1.5">
+      <span className="flex -space-x-1">
         {authors.map((id) => {
           const a = agentById(id);
-          return a ? <CubeStill color={a.color} size={22} key={id} /> : <PersonAvatar size={18} key={id} />;
+          return a ? <CubeStill color={a.color} size={16} key={id} /> : <PersonAvatar size={14} key={id} />;
         })}
       </span>
       <span className="font-semibold text-primary">{replies.length === 1 ? "1 reply" : `${replies.length} replies`}</span>
