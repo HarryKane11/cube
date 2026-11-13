@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Cube, CubeStill } from "@/cube/Cube";
 import { cn } from "@/lib/utils";
 import { useCube, type Conv } from "@/state/store";
+import { showUpdate, useUpdate } from "@/update";
 
 const WORD: Record<string, string> = { thinking: "thinking", working: "working", needs: "needs you", stuck: "stuck", done: "done" };
 
@@ -265,6 +266,9 @@ export function Sidebar() {
   const name = useCube((s) => s.name);
   const goHome = useCube((s) => s.goHome);
   const openSettings = useCube((s) => s.openSettings);
+  // A newer Cube that a check found. Shown until it is installed.
+  const newer = useUpdate((s) => (s.phase === "found" ? s.version : ""));
+  const openUpdate = () => { showUpdate(); openSettings(); };
   const openInbox = useCube((s) => s.openInbox);
   const openLibrary = useCube((s) => s.openLibrary);
   const waiting = useInboxCount();
@@ -348,8 +352,9 @@ export function Sidebar() {
         {convs.filter((c) => c.kind === "channel" && !c.person).map((c) => <Row conv={c} rail key={c.id} />)}
         {convs.filter((c) => c.person).map((c) => <Row conv={c} rail key={c.id} />)}
         {convs.filter((c) => c.kind === "dm").map((c) => <Row conv={c} rail key={c.id} />)}
-        <button type="button" aria-label="Settings" title="Settings" aria-current={view === "settings" ? "page" : undefined} className={cn(railButton, "mt-auto flex-none", view === "settings" && "bg-secondary text-foreground")} onClick={openSettings}>
+        <button type="button" aria-label={newer ? "Settings, an update is ready" : "Settings"} title={newer ? `Update to ${newer}` : "Settings"} aria-current={view === "settings" ? "page" : undefined} className={cn(railButton, "relative mt-auto flex-none", view === "settings" && "bg-secondary text-foreground")} onClick={newer ? openUpdate : openSettings}>
           <GearIcon />
+          {newer && <span className="absolute right-1 top-1 size-2 rounded-full bg-primary" />}
         </button>
         <Palette open={switching} onOpenChange={setSwitching} />
         <NewChannel open={creating} onOpenChange={setCreating} />
@@ -425,7 +430,13 @@ export function Sidebar() {
       </div>
       {extras}
 
-      <div className="mt-auto flex items-center gap-2 px-2 pt-3">
+      {newer && (
+        <button type="button" className="mt-auto flex min-h-[32px] items-center gap-2 rounded-[10px] bg-primary/10 px-2.5 text-left text-[13px] font-semibold text-primary hover:bg-primary/15" onClick={openUpdate}>
+          <span className="size-2 flex-none rounded-full bg-primary" aria-hidden="true" />
+          <span className="min-w-0 truncate">{`Update to ${newer}`}</span>
+        </button>
+      )}
+      <div className={cn("flex items-center gap-2 px-2 pt-3", !newer && "mt-auto")}>
         <PersonAvatar size={28} />
         <span className="min-w-0 flex-1 truncate font-medium">{name || "You"}</span>
         <button

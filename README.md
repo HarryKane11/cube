@@ -90,6 +90,8 @@ Teams talk through a small relay server that you run yourself. It takes a few mi
 
 The first time you open Cube, macOS says it cannot verify the app, because Cube is not signed with a paid Apple developer certificate. Open **System Settings > Privacy & Security**, scroll down and press **Open Anyway**. You do this once.
 
+From then on Cube updates itself: when a newer version is out, the sidebar says so, and **Settings > General > Updates** installs it and restarts. Versions up to 0.1.0 came before this, so from one of those, download the disk image once more.
+
 ### Or let your AI install it
 
 Paste this into Claude Code, Codex, or any assistant that can run commands on your Mac. It downloads Cube, checks the file, installs it and opens it. An assistant that cannot run commands walks you through the same steps instead.
@@ -186,12 +188,21 @@ That keeps Screen Recording granted across rebuilds. The Keychain is stricter: i
 
 <br />
 
-`pnpm dmg` writes three files to `src-tauri/target/universal-apple-darwin/release/bundle/dmg/`: the versioned image, `Cube_universal.dmg`, and `Cube_universal.dmg.sha256`. The download button and the install prompt above point at the last two on the latest release:
+Set the new version in `src-tauri/tauri.conf.json` first (and in `package.json` and `src-tauri/Cargo.toml`, to keep them the same): a copy of Cube updates only to a version higher than its own.
+
+`pnpm dmg` then writes to `src-tauri/target/universal-apple-darwin/release/bundle/dmg/`:
+
+- `Cube_universal.dmg` and `Cube_universal.dmg.sha256`, which the download button and the install prompt above point at, plus the same image with the version in its name.
+- `Cube_universal.app.tar.gz` and `latest.json`, which copies of Cube already installed fetch to update themselves. `latest.json` names the version and carries the archive's signature. `CUBE_RELEASE_NOTES="…" pnpm dmg` puts a line about the release into it, shown in Settings.
+
+All four go onto a release whose tag is `v` and the version, because `latest.json` points at the archive under that tag:
 
 ```bash
 cd src-tauri/target/universal-apple-darwin/release/bundle/dmg
-gh release create v0.1.0 Cube_universal.dmg Cube_universal.dmg.sha256 --title "Cube 0.1.0" --notes "…"
+gh release create v0.1.1 Cube_universal.dmg Cube_universal.dmg.sha256 Cube_universal.app.tar.gz latest.json --title "Cube 0.1.1" --notes "…"
 ```
+
+Updates are signed with a key of their own, `~/.cube-signing/updater.key`, whose public half is in `tauri.conf.json` and so inside every copy of Cube. A copy installs only what that key signed. Keep the key backed up and make releases on the computer that holds it: `pnpm dmg` stops before building if it is missing. If it is lost, the copies people have can no longer update themselves and need a disk image once (`scripts/setup-updater-key.sh` makes a new key).
 
 </details>
 
@@ -233,6 +244,7 @@ Each conversation is a folder at `~/CubeSpaces/<conversation>`. Cubes run with t
 | Where | What |
 |---|---|
 | `src-tauri/src/lib.rs` | Starts agent CLIs as child processes, streams their output to the window, reads and writes files under `~/CubeSpaces` |
+| `src-tauri/src/update.rs`, `src/update/` | Updating from inside the app: asking the release page, checking the signature, replacing the app |
 | `src-tauri/src/team.rs`, `drive.rs` | The connection to the team relay and the shared folder: signing, sending and fetching files |
 | `src/agents/adapters.ts` | Turns each CLI's output into the same small set of events |
 | `src/agents/orchestrator.ts` | The thread: who gets a message, `@Name` handoffs, stepping in, permissions |

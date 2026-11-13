@@ -19,6 +19,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { Stage } from "@/components/Stage";
 import { motion } from "@/cube/engine";
 import { useCube, useStageOpen } from "@/state/store";
+import { startUpdates } from "@/update";
 import "./index.css";
 
 export default function App() {
@@ -33,6 +34,7 @@ export default function App() {
 
   useEffect(() => {
     void init();
+    startUpdates();
   }, []);
 
   useEffect(() => {

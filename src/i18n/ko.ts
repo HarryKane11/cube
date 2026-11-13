@@ -827,6 +827,28 @@ export const EXACT: Record<string, string> = {
   "The merge did not go through. Nothing was changed.": "합치지 못했어요. 바뀐 것은 없어요.",
   "Could not make a separate copy for this cube.": "이 큐브의 별도 사본을 만들지 못했어요.",
   "Could not start tracking this folder with git.": "이 폴더를 git으로 관리하기 시작하지 못했어요.",
+
+  // Updating Cube from inside the app
+  Updates: "업데이트",
+  "Check for updates": "업데이트 확인",
+  "Checking for updates…": "업데이트 확인 중…",
+  "Cube is up to date.": "최신 버전이에요.",
+  "Update and restart": "업데이트하고 다시 시작",
+  "Cube restarts to finish. After an update, macOS asks once more for each secret Cube keeps in the Keychain: choose Always Allow.": "마무리하려면 Cube가 다시 시작돼요. 업데이트한 뒤에는 macOS가 Cube가 키체인에 보관한 값마다 한 번씩 다시 물어요. \"항상 허용\"을 눌러 주세요.",
+  "1 cube is working. Restarting stops it.": "큐브 1개가 작업 중이에요. 다시 시작하면 작업이 멈춰요.",
+  "Restart anyway": "그래도 다시 시작",
+  Later: "나중에",
+  "Downloading…": "내려받는 중…",
+  "Installing. Cube restarts when it is done.": "설치하는 중이에요. 끝나면 Cube가 다시 시작돼요.",
+  "This copy of Cube was built from source, so it does not update itself. Pull the code and build again to update it.": "이 Cube는 소스에서 직접 빌드한 것이라 스스로 업데이트하지 않아요. 코드를 새로 받아 다시 빌드해 주세요.",
+  "Cube updates itself in the desktop app.": "업데이트는 Cube 데스크톱 앱에서 할 수 있어요.",
+  "Settings, an update is ready": "설정, 업데이트가 준비됐어요",
+  "Could not reach the update server. Check the connection and try again.": "업데이트 서버에 연결하지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.",
+  "There is no published release to update to yet.": "아직 업데이트할 릴리스가 없어요.",
+  "The latest release has no build for this Mac.": "최신 릴리스에 이 Mac용 빌드가 없어요.",
+  "The update was not signed by Cube, so it was not installed.": "Cube가 서명한 업데이트가 아니어서 설치하지 않았어요.",
+  "Cube was not allowed to replace itself in this folder, so the update was not installed.": "이 폴더에서 Cube를 바꿀 권한이 없어서 업데이트를 설치하지 못했어요.",
+  "Cube is already up to date.": "이미 최신 버전이에요.",
 };
 
 type Make = (m: RegExpMatchArray, t: (s: string) => string) => string;
@@ -847,6 +869,13 @@ const plural = (n: string, unit: string) => `${unit} ${n}개`;
 
 /** Sentences the app builds with a name, a number or a file in them. The first match wins. */
 export const PATTERNS: [RegExp, Make][] = [
+  // Updating Cube from inside the app
+  [/^Version (\S+)$/, (m) => `버전 ${m[1]}`],
+  [/^Cube (\S+) is ready to install\.$/, (m) => `Cube ${m[1]} 버전을 설치할 수 있어요.`],
+  [/^Update to (\S+)$/, (m) => `${m[1]} 버전으로 업데이트`],
+  [/^Downloading… (\d+)%$/, (m) => `내려받는 중… ${m[1]}%`],
+  [/^(\d+) cubes are working\. Restarting stops them\.$/, (m) => `큐브 ${m[1]}개가 작업 중이에요. 다시 시작하면 작업이 멈춰요.`],
+  [/^The update did not work: (.+)$/, (m) => `업데이트하지 못했어요: ${m[1]}`],
   // A channel's shared folder
   [/^(\d+) not shared$/, (m) => `${m[1]}개 공유 안 됨`],
   [/^(.+) is working on this$/, (m) => `${m[1]} 작업 중`],

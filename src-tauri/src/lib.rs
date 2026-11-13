@@ -25,6 +25,7 @@ mod picture;
 mod remote;
 mod slack;
 mod team;
+mod update;
 
 /// Running agent processes, keyed by run id.
 #[derive(Default)]
@@ -1130,6 +1131,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         // An invite link opened from a browser or a mail (`cube://<relay host>/#invite=…`) reaches the window through this.
         .plugin(tauri_plugin_deep_link::init())
+        // Checks the release page for a newer Cube and installs it; see update.rs.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Runs::default())
         .manage(Inputs::default())
         .manage(Terms::default())
@@ -1138,6 +1141,7 @@ pub fn run() {
         .manage(team::Team::default())
         .manage(drive::Drive::default())
         .manage(slack::Slack::default())
+        .manage(update::Updates::default())
         .invoke_handler(tauri::generate_handler![
             agent_start,
             agent_stop,
@@ -1212,7 +1216,10 @@ pub fn run() {
             remote::remote_secret_delete,
             remote::remote_call,
             remote::remote_stop,
-            browser::window_shot
+            browser::window_shot,
+            update::update_info,
+            update::update_check,
+            update::update_install
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

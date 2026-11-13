@@ -36,6 +36,7 @@ tauri-plugin-deep-link = "2"
 sha2 = "0.10"
 hex = "0.4"
 diffy = "0.4"
+tauri-plugin-updater = "2"
 
 
 [dev-dependencies]

@@ -20,6 +20,15 @@ describe("Korean interface text", () => {
     expect(translate("Today at 09:00")).toBe("오늘 09:00");
   });
 
+  it("words what the updater says, with the version in it", () => {
+    expect(translate("Version 0.1.0")).toBe("버전 0.1.0");
+    expect(translate("Cube 0.2.0 is ready to install.")).toBe("Cube 0.2.0 버전을 설치할 수 있어요.");
+    expect(translate("Update to 0.2.0")).toBe("0.2.0 버전으로 업데이트");
+    expect(translate("Downloading… 42%")).toBe("내려받는 중… 42%");
+    expect(translate("3 cubes are working. Restarting stops them.")).toBe("큐브 3개가 작업 중이에요. 다시 시작하면 작업이 멈춰요.");
+    expect(translate("Check for updates")).toBe("업데이트 확인");
+  });
+
   it("translates pieces joined by a dot one by one, and leaves what it does not know", () => {
     expect(translate("2 replies · 1 file changed (a.md)")).toBe("답글 2개 · 파일 1개 변경 (a.md)");
     expect(translate("notes.md")).toBeNull();

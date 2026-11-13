@@ -15,10 +15,12 @@ import { Knowledge } from "@/components/Knowledge";
 import { RemoteAgents } from "@/components/RemoteAgents";
 import { SlackSettings } from "@/components/SlackSettings";
 import { Subagents } from "@/components/Subagents";
+import { Updates } from "@/components/Updates";
 import { EnginesFound, RoleEngines } from "@/components/TeamSetup";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useCube, type Settings as SettingsShape } from "@/state/store";
+import { useUpdate } from "@/update";
 
 export function Switch({ label, hint, checked, onChange }: { label: string; hint: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -110,6 +112,8 @@ const TABS: { id: Tab; name: string; icon: typeof GearIcon }[] = [
 ];
 /** The tab Settings was last on, for as long as the app is open. */
 let lastTab: Tab = "general";
+/** The last request to be shown the update that Settings answered. */
+let shownUpdate = 0;
 
 export function SettingsView() {
   const [tab, setTab] = useState<Tab>(lastTab);
@@ -124,6 +128,15 @@ export function SettingsView() {
   const restartOnboarding = useCube((s) => s.restartOnboarding);
   const [confirming, setConfirming] = useState(false);
   const pill = "h-8 rounded-full bg-secondary px-3 text-[13px] font-semibold";
+
+  // Asked to show the update (from the sidebar): go to where it is and bring it into view.
+  const showUpdate = useUpdate((s) => s.show);
+  useEffect(() => {
+    if (showUpdate === shownUpdate) return;
+    shownUpdate = showUpdate;
+    pick("general");
+    window.setTimeout(() => document.getElementById("set-updates")?.scrollIntoView({ block: "center" }), 0);
+  }, [showUpdate]);
 
   return (
     <main className="grid min-h-0 grid-cols-[212px_minmax(0,1fr)] overflow-hidden rounded-[22px] border bg-ground">
@@ -228,6 +241,12 @@ export function SettingsView() {
           </div>
           <Switch label="Calm cubes" hint="Cubes stop twisting their layers while they work. Their faces still change." checked={settings.calm} onChange={(v) => set("calm", v)} />
         </Section>
+
+        <div id="set-updates">
+          <Section title="Updates">
+            <Updates />
+          </Section>
+        </div>
           </>
         )}
 

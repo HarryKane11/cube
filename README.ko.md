@@ -90,6 +90,8 @@
 
 처음 열 때 macOS가 "확인할 수 없는 앱"이라고 막습니다. Cube가 유료 Apple 개발자 인증서로 서명되지 않았기 때문입니다. **시스템 설정 > 개인정보 보호 및 보안**을 열고 아래쪽의 **그래도 열기**를 누르세요. 한 번만 하면 됩니다.
 
+그 뒤로는 Cube가 스스로 업데이트합니다. 새 버전이 나오면 사이드바에 알려 주고, **설정 > 일반 > 업데이트**에서 설치하면 다시 시작됩니다. 0.1.0까지는 이 기능이 없던 버전이라, 그 버전을 쓰고 있다면 디스크 이미지를 한 번 더 받아 주세요.
+
 ### AI에게 설치 맡기기
 
 아래 내용을 Claude Code, Codex처럼 내 Mac에서 명령을 실행할 수 있는 AI에 붙여 넣으세요. 내려받고, 파일을 검증하고, 설치하고, 실행까지 해 줍니다. 명령을 실행할 수 없는 AI라면 같은 순서를 하나씩 안내해 줍니다.
@@ -186,12 +188,21 @@ macOS는 화면 기록이나 키체인 접근 권한을 "어떻게 서명된 앱
 
 <br />
 
-`pnpm dmg`는 `src-tauri/target/universal-apple-darwin/release/bundle/dmg/`에 파일 세 개를 만듭니다. 버전이 붙은 이미지, `Cube_universal.dmg`, `Cube_universal.dmg.sha256`입니다. 위의 다운로드 버튼과 설치 프롬프트는 최신 릴리스의 뒤쪽 두 파일을 가리킵니다.
+먼저 `src-tauri/tauri.conf.json`의 버전을 올립니다(`package.json`, `src-tauri/Cargo.toml`도 같은 값으로 맞춥니다). 설치된 Cube는 자기보다 높은 버전으로만 업데이트합니다.
+
+그다음 `pnpm dmg`가 `src-tauri/target/universal-apple-darwin/release/bundle/dmg/`에 다음 파일을 만듭니다.
+
+- `Cube_universal.dmg`, `Cube_universal.dmg.sha256`: 위의 다운로드 버튼과 설치 프롬프트가 가리키는 파일입니다. 이름에 버전이 붙은 같은 이미지도 함께 나옵니다.
+- `Cube_universal.app.tar.gz`, `latest.json`: 이미 설치된 Cube가 업데이트할 때 받아 가는 파일입니다. `latest.json`에는 버전과 묶음의 서명이 들어 있습니다. `CUBE_RELEASE_NOTES="…" pnpm dmg`로 릴리스 설명 한 줄을 넣으면 설정 화면에 보입니다.
+
+네 파일을 모두 `v` + 버전 태그의 릴리스에 올립니다. `latest.json`이 그 태그 아래의 묶음을 가리키기 때문입니다.
 
 ```bash
 cd src-tauri/target/universal-apple-darwin/release/bundle/dmg
-gh release create v0.1.0 Cube_universal.dmg Cube_universal.dmg.sha256 --title "Cube 0.1.0" --notes "…"
+gh release create v0.1.1 Cube_universal.dmg Cube_universal.dmg.sha256 Cube_universal.app.tar.gz latest.json --title "Cube 0.1.1" --notes "…"
 ```
+
+업데이트는 전용 키 `~/.cube-signing/updater.key`로 서명합니다. 공개 키는 `tauri.conf.json`에 있어서 모든 Cube에 들어가고, Cube는 이 키로 서명된 것만 설치합니다. 키를 백업해 두고, 릴리스는 이 키가 있는 컴퓨터에서 만드세요. 키가 없으면 `pnpm dmg`가 빌드 전에 멈춥니다. 키를 잃으면 이미 설치된 Cube는 스스로 업데이트할 수 없어서 디스크 이미지를 한 번 다시 받아야 합니다(`scripts/setup-updater-key.sh`로 새 키를 만듭니다).
 
 </details>
 
@@ -233,6 +244,7 @@ flowchart TD
 | 위치 | 내용 |
 |---|---|
 | `src-tauri/src/lib.rs` | 에이전트 CLI를 자식 프로세스로 띄우고, 출력을 창으로 스트리밍하고, `~/CubeSpaces` 아래 파일을 읽고 씁니다 |
+| `src-tauri/src/update.rs`, `src/update/` | 앱 안에서 하는 업데이트. 릴리스 페이지 확인, 서명 검사, 앱 교체 |
 | `src-tauri/src/team.rs`, `drive.rs` | 팀 릴레이 연결과 공유 폴더. 서명, 파일 올리기와 받기 |
 | `src/agents/adapters.ts` | CLI마다 다른 출력을 같은 이벤트 몇 가지로 바꿉니다 |
 | `src/agents/orchestrator.ts` | 스레드. 누가 메시지를 받는지, `@이름` 넘기기, 끼어들기, 권한 |

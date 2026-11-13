@@ -239,6 +239,14 @@ export const slackUser = (user: string) => invoke<string>("slack_user", { user }
 export const slackScopes = () => invoke<string[]>("slack_scopes");
 /** Puts a picture inside ~/CubeSpaces into a Slack thread. */
 export const slackUpload = (channel: string, threadTs: string, path: string, title: string) => invoke<void>("slack_upload", { channel, threadTs, path, title });
+/** This copy's version, and whether it updates itself: a build made from source does not. */
+export const updateInfo = () => (inTauri ? invoke<{ version: string; updates: boolean }>("update_info") : Promise.resolve({ version: "", updates: false }));
+/** Asks the release page for a newer Cube. Nothing is downloaded; null when this is the newest. */
+export const updateCheck = () => invoke<{ version: string; notes: string } | null>("update_check");
+/** Downloads the update the last check found, checks its signature, installs it and restarts Cube. */
+export const updateInstall = () => invoke<void>("update_install");
+/** How much of the update has been downloaded. `total` is 0 when the server did not say. */
+export const updateListen = (on: (v: { done: number; total: number }) => void) => listen<{ done: number; total: number }>("update-progress", (e) => on(e.payload));
 /** Has Codex's image tool draw a picture into `<dir>/pictures`. Returns the file's path. Takes a minute or two. */
 export const drawPicture = (id: string, dir: string, name: string, description: string) => invoke<string>("draw_picture", { id, dir, name, description });
 /** What the drawing is doing right now, as short lines, each with the id its request was made with. */
