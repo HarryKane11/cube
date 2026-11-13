@@ -133,7 +133,7 @@ describe("trust levels", () => {
       return `${start.params.sandbox}/${start.params.approvalPolicy}`;
     };
     expect([codex("ask"), codex("edits"), codex("auto"), codex("free"), codex("plan")]).toEqual([
-      "read-only/untrusted", "workspace-write/untrusted", "workspace-write/never", "danger-full-access/never", "read-only/never",
+      "read-only/untrusted", "workspace-write/untrusted", "workspace-write/on-request", "danger-full-access/never", "read-only/never",
     ]);
     expect(mode("plan")).toBe("plan");
     expect(ADAPTERS.hermes.command("x", undefined, { trust: "free" }).args).toContain("--yolo");

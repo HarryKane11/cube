@@ -19,10 +19,16 @@ function parseJson(line: string): any {
 }
 
 /** What Codex is told about asking and its sandbox, for each level of trust. */
-const CODEX_TRUST: Record<NonNullable<RunOpts["trust"]>, { approvalPolicy: string; sandbox: string }> = {
+const CODEX_TRUST: Record<NonNullable<RunOpts["trust"]>, { approvalPolicy: string; sandbox: string; config?: Record<string, unknown> }> = {
   ask: { approvalPolicy: "untrusted", sandbox: "read-only" },
   edits: { approvalPolicy: "untrusted", sandbox: "workspace-write" },
-  auto: { approvalPolicy: "never", sandbox: "workspace-write" },
+  // Auto works to the end inside the sandbox without asking, and is let onto the network: Codex's
+  // sandbox shuts out even local addresses, and without them a cube cannot reach the browser Cube
+  // opened for it or look anything up. Where it may write stays the conversation's folder. What
+  // cannot run in the sandbox at all (a tool that reads the Keychain, like Aside) Codex may ask
+  // to run outside it: that request is answered the way every other one is, by the person or by
+  // a rule they made.
+  auto: { approvalPolicy: "on-request", sandbox: "workspace-write", config: { sandbox_workspace_write: { network_access: true } } },
   free: { approvalPolicy: "never", sandbox: "danger-full-access" },
   plan: { approvalPolicy: "never", sandbox: "read-only" },
 };

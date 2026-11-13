@@ -13,14 +13,14 @@ import { fenced, removeFromConv, startTeam, taggedIn, unshareConv } from "../tea
 import { checkScopes, startSlack } from "../slack";
 import { customAdapter, parseManifest, type Manifest } from "./custom";
 import { startMock } from "./mock";
-import { BUDGET, MESSAGE_LIMIT, ROUTER_BUDGET, cutNote, importedBlock, sessionLost, withinBudget, workEntry, workLogBlock, type Imported } from "./context";
+import { BUDGET, MESSAGE_LIMIT, ROUTER_BUDGET, asideHint, cutNote, importedBlock, sessionLost, withinBudget, workEntry, workLogBlock, type Imported } from "./context";
 import { leftLately, notesBlock, routerLine, routerSaid, splitNotes, splitPlan, type Note, type Picture } from "./notes";
 import { notify } from "../lib/notify";
 import { dayKey, due } from "../lib/schedule";
 import { clashing } from "../lib/stats";
 import { allowedBy, describeAsk, isEditTool, planOf, questionsOf, ruleFor } from "./permissions";
 import { customAgents, drawPicture, keyList, pictureListen, slackPost, slackUpload } from "./runner";
-import { checkpointRestore, checkpointSave, detectEngines, endInput, ensureSpace, inTauri, listFiles, readText, startProcess, stopProcess, trashPath, windowsList, workspaceList, workspacePick, workspaceRemove, writeProcess } from "./runner";
+import { checkpointRestore, checkpointSave, detectEngines, endInput, ensureSpace, inTauri, listFiles, readText, startProcess, stopProcess, toolsFound, trashPath, windowsList, workspaceList, workspacePick, workspaceRemove, writeProcess } from "./runner";
 import { branchOf, closeTree, ensureRepo, prepareTree } from "./trees";
 import { ORCH, ROLE_DEFAULTS, ROUTER, agentNamed, isLeadRole, mayCallLead } from "./types";
 import { AGENTS, ENGINE_CAN, agentById, authorName, pickEngine, route, trustFor, type AgentDef, type AgentKind, type Ev, type Mode, type RunOpts, type Trust } from "./types";
@@ -531,6 +531,7 @@ export async function init(): Promise<void> {
   void refreshUsage();
   void loadEmojis();
   void loadWorkspaces();
+  if (inTauri) void toolsFound().then((found) => store().setTools(found)).catch(() => undefined);
   void startTeam(outside, scan).catch(() => undefined);
   void startSlack(outside).catch(() => undefined);
   window.setInterval(() => knowledgeTick(active.size > 0), 60_000);
@@ -908,6 +909,11 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
   const reactTold = `rule:react:${Object.keys(s.emojis).length}`;
   const canReact = !aside && !isRouter && engine !== "remote";
   if (canReact && session && !already.includes(reactTold)) prompt += `\n\nNew since this conversation began:\n${reactRule()}`;
+  // Said in every request while it is true: how this cube gets to the person's own browser depends on the program and the mode it runs in now.
+  if (!aside && !isRouter && !isLead && engine !== "remote" && opts.trust !== "plan" && s.tools.includes("aside")) {
+    // Codex runs commands in its own sandbox unless the conversation is set to Bypass.
+    also(`\n\n${asideHint({ person: s.name || "the person", boxed: engine === "codex" && opts.trust !== "free" })}`);
+  }
   // Said in every request while it is true: what the cube left before is the only way it can vary.
   const leftBefore = aside || engine === "remote" ? [] : leftLately(s.messages, conv.id, agentId);
   if (leftBefore.length) also(`\n\nThe reactions you left in this conversation lately, oldest first: ${leftBefore.join(" ")}. ${s.name || "The person"} sees them one under another: leave a different one this time, one that fits this message, unless they ask for that very one.`);

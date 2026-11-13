@@ -34,6 +34,15 @@ describe("codex adapter", () => {
     ]);
   });
 
+  it("lets a cube in Auto onto the network and lets it ask to leave the sandbox, and keeps the other sandboxes shut", () => {
+    const start = (trust: "auto" | "edits") => {
+      const p = ADAPTERS.codex.command("hi", undefined, { trust }).parser!;
+      return sends(p.stdout('{"id":1,"result":{}}'))[1].params;
+    };
+    expect(start("auto")).toEqual({ approvalPolicy: "on-request", sandbox: "workspace-write", config: { sandbox_workspace_write: { network_access: true } }, model: null });
+    expect(start("edits")).toEqual({ approvalPolicy: "untrusted", sandbox: "workspace-write", model: null });
+  });
+
   it("resumes a session, and starts a new thread when the old one is gone", () => {
     const p = ADAPTERS.codex.command("hi", "old", { trust: "free" }).parser!;
     expect(sends(p.stdout('{"id":1,"result":{}}'))[1]).toEqual({ id: 2, method: "thread/resume", params: { threadId: "old", approvalPolicy: "never", sandbox: "danger-full-access", model: null } });

@@ -243,6 +243,18 @@ async fn detect_engines() -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Browsers with a window of their own that a cube drives from the command line, as far as they
+/// are installed. Only the names listed here are looked for.
+#[tauri::command]
+async fn tools_found() -> Result<Vec<String>, String> {
+    let dirs: Vec<PathBuf> = shell_path().split(':').filter(|d| !d.is_empty()).map(PathBuf::from).collect();
+    Ok(["aside"]
+        .into_iter()
+        .filter(|name| dirs.iter().any(|d| d.join(name).is_file()))
+        .map(String::from)
+        .collect())
+}
+
 /// Creates ~/CubeSpaces/<name> if needed and returns its path.
 #[tauri::command]
 async fn ensure_space(name: String) -> Result<String, String> {
@@ -1161,6 +1173,7 @@ pub fn run() {
             workspace::workspace_pick,
             workspace::workspace_list,
             workspace::workspace_remove,
+            tools_found,
             sessions::sessions_list,
             sessions::session_read,
             usage::usage_read,

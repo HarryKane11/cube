@@ -139,3 +139,16 @@ export function importedBlock(i: Imported, person: string): string {
     i.context,
   ].join("\n\n");
 }
+
+/**
+ * What a cube is told about Aside, the person's own browser, when it is installed: how to use it,
+ * that its tab is not the one in front, and how to show the page. A cube on Codex runs commands
+ * in a sandbox that shuts out the Keychain, which Aside reads, so there it is also told to ask
+ * for each `aside` command to run outside the sandbox.
+ */
+export function asideHint(o: { person: string; boxed: boolean }): string {
+  const out = o.boxed
+    ? ` Aside reads the Keychain, which your sandbox shuts out: ask for every \`aside\` command to run outside the sandbox, and say that this is why. ${o.person} is asked for their OK.`
+    : "";
+  return `Aside, ${o.person}'s own browser, is installed, and while you use it Cube shows its window on the Stage. Use it when they ask for Aside, when a page needs their sign-in, or when they should see the browsing: \`aside repl "<JavaScript>"\` runs against that browser, for example \`aside repl "const p = await openTab('https://example.com'); console.log(await p.title())"\` (\`aside repl --help\` says more).${out} A tab you open closes when that command ends: do everything you need on a page in one command. The tab you open is behind whatever ${o.person} has in front in Aside, so to show them the page you are on, save a picture of it into the current folder under the same name each time, and Cube opens it on the Stage: \`aside repl "const p = await openTab('https://example.com'); const { base64Image } = await annotatedScreenshot(p); console.log('SHOT ' + base64Image)" | sed -n 's/^SHOT //p' | base64 -d > aside-view.png\`. It is their real browser with their accounts: look and navigate freely, and ask ${o.person} before you post, send, buy or change anything in an account.`;
+}

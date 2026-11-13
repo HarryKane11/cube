@@ -424,6 +424,9 @@ interface CubeState {
   /** The folders open as workspaces. The app's own side keeps the list (workspace.rs); this is what it last said. */
   workspaces: Workspace[];
   setWorkspaces(workspaces: Workspace[]): void;
+  /** Browsers with a window of their own that are installed on this Mac ("aside"). Looked for when the app opens. */
+  tools: string[];
+  setTools(tools: string[]): void;
   /** What each agent program says is used of the plan it is signed in with. */
   usage: Partial<Record<UsageProgram, ProgramUsage>>;
   setUsage(program: UsageProgram, usage: ProgramUsage): void;
@@ -683,6 +686,8 @@ export const useCube = create<CubeState>()(
       setEmojis: (emojis) => set({ emojis }),
       workspaces: [],
       setWorkspaces: (workspaces) => set({ workspaces }),
+      tools: [],
+      setTools: (tools) => set({ tools }),
       usage: {},
       setUsage: (program, usage) => set((s) => ({ usage: { ...s.usage, [program]: usage } })),
       ran: {},

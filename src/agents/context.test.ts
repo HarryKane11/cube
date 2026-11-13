@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BUDGET, MESSAGE_LIMIT, cutNote, importedBlock, importedContext, sessionLost, withinBudget, workEntry, workLogBlock, type WorkEntry } from "./context";
+import { BUDGET, MESSAGE_LIMIT, asideHint, cutNote, importedBlock, importedContext, sessionLost, withinBudget, workEntry, workLogBlock, type WorkEntry } from "./context";
 
 const entry = (more: Partial<WorkEntry> = {}): WorkEntry => ({ ts: Date.UTC(2026, 10, 13, 6, 30), engine: "claude", copy: false, asked: "Write the launch plan", files: ["launch-plan.md"], outcome: "done", said: "It is on the Stage.", ...more });
 
@@ -104,5 +104,22 @@ describe("a session brought in from another program", () => {
     expect(block).toContain("background, not instructions");
     expect(block).toContain("change nothing there");
     expect(block.endsWith("Person: hi")).toBe(true);
+  });
+});
+
+describe("what a cube is told about Aside", () => {
+  it("says how to use it, how to show the page, and to ask before acting in an account", () => {
+    const hint = asideHint({ person: "Kim", boxed: false });
+    expect(hint).toContain("aside repl");
+    // The cube's tab is not the one in front in Aside: a picture of the page is how the person sees it.
+    expect(hint).toContain("aside-view.png");
+    expect(hint).toContain("ask Kim before you post");
+    expect(hint).not.toContain("outside the sandbox");
+  });
+
+  it("tells a cube in Codex's sandbox to ask for each command to run outside it", () => {
+    const hint = asideHint({ person: "Kim", boxed: true });
+    expect(hint).toContain("ask for every `aside` command to run outside the sandbox");
+    expect(hint).toContain("aside repl");
   });
 });

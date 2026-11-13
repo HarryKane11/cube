@@ -65,6 +65,8 @@ export function logLine(line: string): void {
 /** Names of the agent programs found on this computer: any of "claude", "codex", "hermes". */
 export const detectEngines = () => invoke<string[]>("detect_engines");
 export const ensureSpace = (name: string) => invoke<string>("ensure_space", { name });
+/** Browsers with a window of their own that are installed here: "aside". */
+export const toolsFound = () => invoke<string[]>("tools_found");
 /** Opens the system's folder dialog; the folder the person picks becomes a workspace. Null when they close it. */
 export const workspacePick = () => invoke<{ dir: string; name: string; git: boolean; missing: boolean } | null>("workspace_pick");
 export const workspaceList = () => invoke<{ dir: string; name: string; git: boolean; missing: boolean }[]>("workspace_list");
