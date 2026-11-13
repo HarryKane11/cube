@@ -3,11 +3,13 @@
 # hand to teammates.
 #
 # The app inside is signed with this computer's local signing identity (~/.cube-signing), the
-# same one every build here is signed with. macOS ties a permission to how an app is signed, so
-# as long as every disk image comes from the same identity, a teammate gives Cube Screen
-# Recording and Keychain access once and is not asked again when they install a newer one.
+# one identity for every image, and never one person's Apple Development certificate. macOS ties
+# Screen Recording to how an app is signed, so as long as every disk image comes from the same
+# identity, a teammate grants it once and is not asked again when they install a newer one.
 # Keep ~/.cube-signing safe: an image signed with another identity is a new app to macOS.
 #
+# The Keychain is stricter: without a certificate Apple issued it knows an app by each build's
+# hash, so a teammate is asked once more for each saved secret after installing a newer image.
 # The certificate is self-signed, so macOS still asks a teammate to confirm the first time they
 # open the app (System Settings > Privacy & Security > Open Anyway). Only a paid Apple Developer
 # ID removes that.
@@ -23,7 +25,7 @@ fi
 
 pnpm tauri build --target universal-apple-darwin --bundles app
 APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Cube.app"
-bash scripts/sign-mac.sh "$APP"
+CUBE_SIGN_WITH=local bash scripts/sign-mac.sh "$APP"
 
 VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
 OUT="src-tauri/target/universal-apple-darwin/release/bundle/dmg"

@@ -175,7 +175,9 @@ macOS ties permissions (Screen Recording, Keychain access) to how an app is sign
 
 The identity is a self-signed certificate and key in `~/.cube-signing`, outside the repository. No keychain and no system setting is touched. `CUBE_NO_SIGN=1 pnpm app` leaves a build unsigned.
 
-`pnpm dmg` signs the disk image's app with the same identity. Make every disk image on the computer that holds `~/.cube-signing` (or a copy of it): images signed with the same identity are the same app to macOS, so people keep their permissions across updates. Someone who uses both a disk image and their own build from source has two differently signed apps under one name, and macOS keeps one permission entry per name, so use one or the other.
+That keeps Screen Recording granted across rebuilds. The Keychain is stricter: it remembers "Always Allow" across rebuilds only for an app signed with a certificate Apple issued, and knows any other app by each build's own hash. With the local identity, every rebuild is asked again for each secret Cube saved (Slack tokens, the team key, model keys). If you rebuild often, make a free Apple Development certificate (Xcode > Settings > Accounts > Manage Certificates): `pnpm app` signs with it whenever the login keychain has one. The switch makes Cube a new app to macOS once, so Screen Recording and each saved secret are asked for one more time; choose Always Allow.
+
+`pnpm dmg` always signs the disk image's app with the local identity, never with an Apple Development certificate, which carries its owner's name. Make every disk image on the computer that holds `~/.cube-signing` (or a copy of it): images signed with the same identity are the same app to macOS, so people keep their permissions across updates. Someone who uses both a disk image and their own build from source has two differently signed apps under one name, and macOS keeps one permission entry per name, so use one or the other.
 
 </details>
 
