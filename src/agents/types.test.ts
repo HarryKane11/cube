@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AGENTS, agentById, mayCallLead, paletteOf, pickEngine, route } from "./types";
+import { AGENTS, agentById, applyPalettes, mayCallLead, paletteOf, pickEngine, route, sidesOf } from "./types";
 
 const everyone = AGENTS.map((a) => a.id);
 
@@ -45,6 +45,32 @@ describe("paletteOf", () => {
   it("gives a role's cube three sticker colors and leaves other colors plain", () => {
     expect(paletteOf(agentById("writer")!.color)).toHaveLength(3);
     expect(paletteOf("#C7C7CC")).toBeNull();
+  });
+});
+
+describe("sidesOf, a solved cube's six sides", () => {
+  it("gives a role's cube the same color on opposite sides", () => {
+    const [front, top, side] = agentById("writer")!.palette;
+    expect(sidesOf(agentById("writer")!.color)).toEqual([front, front, side, side, top, top]);
+    expect(sidesOf("#C7C7CC")).toBeNull();
+  });
+
+  it("solves the Orchestrator's cube into one color per side, showing its palette at rest", () => {
+    const orch = agentById("orchestrator")!;
+    const sides = sidesOf(orch.color)!;
+    expect(new Set(sides).size).toBe(6);
+    // Front, top and the near side are the ones that face the person.
+    expect([sides[0], sides[4], sides[2]]).toEqual(orch.palette);
+  });
+
+  it("uses the person's own colors on every side once they pick some", () => {
+    const orch = agentById("orchestrator")!;
+    applyPalettes({ [orch.id]: ["#111111", "#222222", "#333333"] });
+    try {
+      expect(sidesOf(orch.color)).toEqual(["#111111", "#111111", "#333333", "#333333", "#222222", "#222222"]);
+    } finally {
+      applyPalettes({});
+    }
   });
 });
 

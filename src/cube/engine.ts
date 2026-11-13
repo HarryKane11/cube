@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { logLine } from "../agents/runner";
-import { mosaicOf, paletteOf, type Status } from "../agents/types";
+import { sidesOf, type Status } from "../agents/types";
 import { drawFace, exprFor, FACE_H, FACE_W, type Expr } from "./faces";
 
 /**
@@ -60,22 +60,19 @@ export class CubeInst {
     this.scene.add(key, fill, this.root);
     this.root.scale.setScalar(2.45 / TOTAL);
 
-    // A role's cube is a solved puzzle at rest: one color per face (front, top, side) on a dark
-    // body. Work scrambles the colors across the faces, and finishing solves them back.
-    // Any other color gets a plain cube in tints of itself.
-    const pal = paletteOf(color);
-    const bodyColor = pal ? new THREE.Color(pal[0]).lerp(new THREE.Color("#141418"), 0.74) : new THREE.Color(color);
-    const body = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: pal ? 0.55 : 0.85 });
+    // A role's cube is a solved puzzle at rest: one color per side on a dark body. Work scrambles
+    // the colors across the sides, and finishing solves them back. The team's cube is no
+    // different, only its six sides are six colors. Any other color gets a plain cube in tints
+    // of itself.
+    const sides = sidesOf(color);
+    const bodyColor = sides ? new THREE.Color(sides[0]).lerp(new THREE.Color("#141418"), 0.74) : new THREE.Color(color);
+    const body = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: sides ? 0.55 : 0.85 });
     const geo = new RoundedBoxGeometry(1, 1, 1, 4, 0.16);
     const sticker = new RoundedBoxGeometry(0.8, 0.8, 0.05, 2, 0.02);
-    const mat = (k: number) => new THREE.MeshStandardMaterial({ color: tint(color, k), roughness: 0.3 });
-    const flat = (hex: string) => new THREE.MeshStandardMaterial({ color: new THREE.Color(hex), roughness: 0.38 });
-    const front = pal ? flat(pal[0]) : mat(0.22), top = pal ? flat(pal[1]) : mat(0.6), sideM = pal ? flat(pal[2]) : mat(0.42);
-    this.owned.push(body, geo, sticker, front, sideM, top);
-    // A team cube has every teammate's color on it, mixed across all faces.
-    const mix = mosaicOf(color)?.map(flat) ?? null;
-    if (mix) this.owned.push(...mix);
-    const of = (face: THREE.Material, x: number, y: number, z: number, k: number) => (mix ? mix[(x * 5 + y * 3 + z * 7 + k * 2) % mix.length] : face);
+    const [front, back, right, left, top, bottom] = sides
+      ? sides.map((hex) => new THREE.MeshStandardMaterial({ color: new THREE.Color(hex), roughness: 0.38 }))
+      : [0.22, 0.22, 0.42, 0.42, 0.6, 0.6].map((k) => new THREE.MeshStandardMaterial({ color: tint(color, k), roughness: 0.3 }));
+    this.owned.push(body, geo, sticker, front, back, right, left, top, bottom);
     const half = (N - 1) / 2;
     const o = 0.502;
     for (let x = 0; x < N; x++) for (let y = 0; y < N; y++) for (let z = 0; z < N; z++) {
@@ -87,12 +84,12 @@ export class CubeInst {
         s.rotation.set(rx, ry, 0);
         c.add(s);
       };
-      if (z === N - 1) add(of(front, x, y, z, 0), 0, 0, o, 0, 0);
-      if (z === 0) add(of(front, x, y, z, 1), 0, 0, -o, 0, 0);
-      if (x === N - 1) add(of(sideM, x, y, z, 2), o, 0, 0, 0, H);
-      if (x === 0) add(of(sideM, x, y, z, 3), -o, 0, 0, 0, H);
-      if (y === N - 1) add(of(top, x, y, z, 4), 0, o, 0, H, 0);
-      if (y === 0) add(of(top, x, y, z, 5), 0, -o, 0, H, 0);
+      if (z === N - 1) add(front, 0, 0, o, 0, 0);
+      if (z === 0) add(back, 0, 0, -o, 0, 0);
+      if (x === N - 1) add(right, o, 0, 0, 0, H);
+      if (x === 0) add(left, -o, 0, 0, 0, H);
+      if (y === N - 1) add(top, 0, o, 0, H, 0);
+      if (y === 0) add(bottom, 0, -o, 0, H, 0);
       this.root.add(c);
       this.cubies.push(c);
     }
@@ -290,7 +287,7 @@ class Engine {
   /** One still frame of a resting cube, as an image URL. Used for avatars that do not need to move. */
   still(color: string): string | null {
     // The picture depends on the face colors too, which the person can change.
-    const key = `${color}|${paletteOf(color)?.join() ?? ""}`;
+    const key = `${color}|${sidesOf(color)?.join() ?? ""}`;
     const cached = this.stills.get(key);
     if (cached) return cached;
     const r = this.ensure();

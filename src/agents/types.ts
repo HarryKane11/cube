@@ -22,8 +22,12 @@ export interface AgentDef {
   prefers: AgentKind[];
   /** Words in a request that point to this role, English and Korean. */
   keywords: string[];
-  /** Sticker colors mixed across every face, for a cube that stands for the whole team. */
-  mosaic?: string[];
+  /**
+   * For a cube that stands for the whole team: the colors of the three sides turned away at rest
+   * (behind the front, under the top, across from the side). With them all six sides differ, so
+   * the cube shows three colors when solved and every teammate's color while it works.
+   */
+  away?: [string, string, string];
   /** For a sub-agent the person made: how it should go about its work, told to it at the start of a conversation. */
   instructions?: string;
   /** A sub-agent the person made, as opposed to a role Cube comes with. */
@@ -207,8 +211,8 @@ const BUILT_IN: AgentDef[] = [
     brief: "You lead the team: you plan work that takes several steps or teammates, hand out each step, and report back.",
     color: "#5B5BD6",
     palette: ["#FF4D8D", "#FFC83D", "#2F7BFF"],
-    // One sticker color from each teammate.
-    mosaic: ["#7A4DF0", "#FF7A1A", "#1FA864", "#FF4D8D", "#2F7BFF", "#FFC83D"],
+    // With the palette, one color from each teammate: six sides, six colors.
+    away: ["#7A4DF0", "#1FA864", "#FF7A1A"],
     prefers: ["codex", "claude", "hermes"],
     keywords: [],
   },
@@ -295,7 +299,6 @@ export function applyPalettes(next: Record<string, Palette>): void {
   picked = next;
 }
 
-/** Sticker colors for a cube: the person's choice for that role, the role's own palette, or tints of a single color. */
 /**
  * Whether a cube that names the Orchestrator in its reply starts it. The Router always does.
  * A teammate does too, unless it is working on a plan of the Orchestrator's: then the
@@ -305,15 +308,26 @@ export function applyPalettes(next: Record<string, Palette>): void {
  */
 export const mayCallLead = (isRouter: boolean, inPlan: boolean): boolean => isRouter || !inPlan;
 
+/** Sticker colors for a cube: the person's choice for that role, the role's own palette, or null for a color that is no role's. */
 export function paletteOf(color: string): Palette | null {
   const agent = AGENTS.find((a) => a.color.toLowerCase() === color.toLowerCase());
   return agent ? (picked[agent.id] ?? agent.palette) : null;
 }
 
-/** The mixed sticker colors of a team cube, unless the person gave that role colors of their own. */
-export function mosaicOf(color: string): string[] | null {
+/** The colors of a cube's six sides when it is solved: front, back, right, left, top, bottom. */
+export type Sides = [string, string, string, string, string, string];
+
+/**
+ * One color for each side of a role's solved cube, or null for a color that is no role's.
+ * Opposite sides share a color, except on a team cube, whose far sides carry the rest of the
+ * team's colors unless the person gave that role colors of their own.
+ */
+export function sidesOf(color: string): Sides | null {
   const agent = AGENTS.find((a) => a.color.toLowerCase() === color.toLowerCase());
-  return agent?.mosaic && !picked[agent.id] ? agent.mosaic : null;
+  if (!agent) return null;
+  const [front, top, side] = picked[agent.id] ?? agent.palette;
+  const [back, bottom, far] = picked[agent.id] ? [front, top, side] : (agent.away ?? [front, top, side]);
+  return [front, back, side, far, top, bottom];
 }
 
 /** Ready-made cube colors: front, top, side. */
