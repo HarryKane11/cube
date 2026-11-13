@@ -1,6 +1,6 @@
 [package]
 name = "cube"
-version = "0.1.1"
+version = "0.1.2"
 description = "Cube: a workspace where people and agents work together"
 edition = "2024"
 
