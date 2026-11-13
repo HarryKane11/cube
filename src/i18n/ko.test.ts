@@ -3,7 +3,7 @@ import { translate } from "./dom";
 
 describe("Korean interface text", () => {
   it("looks whole pieces up and keeps the spaces around them", () => {
-    expect(translate("Inbox")).toBe("받은 큐브함");
+    expect(translate("Inbox")).toBe("할 일");
     // A particle attaches to the name before it: "Builder" + " needs your OK" reads "Builder가 …".
     expect(translate(" needs your OK")).toBe("가 확인을 기다려요");
     expect(translate("  · live ")).toBe("  · 실시간 ");

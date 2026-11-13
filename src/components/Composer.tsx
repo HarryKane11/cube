@@ -47,7 +47,8 @@ interface Pick {
 const MODE_TONE: Record<Mode, string> = {
   manual: "text-muted-foreground hover:bg-accent hover:text-foreground",
   auto: "bg-primary/10 text-primary",
-  bypass: "bg-destructive/10 text-destructive",
+  // Still said in the warning color, but as words: a filled red pill outweighed everything else in the box.
+  bypass: "text-destructive hover:bg-destructive/10",
   plan: "bg-secondary text-foreground",
 };
 

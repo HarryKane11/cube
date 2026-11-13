@@ -383,7 +383,7 @@ export function AgentProfile() {
         <header className="flex items-center gap-5 pt-2">
           <Cube color={agent.color} status={live?.status ?? "idle"} size={112} />
           <div className="min-w-0 flex-1">
-            <h1 className="font-heading text-[30px] font-bold leading-tight tracking-[-0.03em]">{agent.name}</h1>
+            <h1 className="font-heading text-[24px] font-bold leading-tight tracking-[-0.03em]">{agent.name}</h1>
             <p className="text-muted-foreground">{live?.statement || agent.role}</p>
             <p className="mt-1 max-w-[460px] text-[13px] text-muted-foreground">{agent.brief.replace(/^You /, "I ").replace(/\byou\b/g, "I")}</p>
           </div>

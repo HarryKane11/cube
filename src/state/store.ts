@@ -442,7 +442,10 @@ interface CubeState {
   setStage(convId: string, value: "open" | "closed"): void;
   openSettings(): void;
   openInbox(): void;
-  openLibrary(): void;
+  /** Opens the Library, on one of its own sections when one is named. */
+  openLibrary(at?: "schedules" | "files"): void;
+  /** The Library section the person asked for from elsewhere, until they pick another. */
+  libraryAt?: "schedules" | "files";
   /** Opens the conversation a message is in and brings the message into view. */
   jumpTo(msgId: string): void;
   addDecision(d: Decision): void;
@@ -612,7 +615,7 @@ export const useCube = create<CubeState>()(
       setStage: (convId, value) => set((s) => ({ stage: { ...s.stage, [convId]: value } })),
       openSettings: () => set({ view: "settings", threadId: undefined }),
       openInbox: () => set({ view: "inbox", threadId: undefined }),
-      openLibrary: () => set({ view: "library", threadId: undefined }),
+      openLibrary: (at) => set({ view: "library", threadId: undefined, libraryAt: at }),
       jumpTo: (msgId) =>
         set((s) => {
           const m = s.messages.find((x) => x.id === msgId);

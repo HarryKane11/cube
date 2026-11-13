@@ -223,7 +223,7 @@ function Empty({ conv }: { conv: Conv }) {
   return (
     <div className="m-auto flex max-w-[320px] flex-col items-center gap-1.5 px-6 text-center">
       {dm && <Cube color={dm.color} status="idle" size={96} />}
-      <h2 className="font-heading text-lg font-bold tracking-[-0.02em]">{dm || conv.person ? `Just you and ${dm ? dm.name : conv.name}` : `This is the start of #${conv.name}`}</h2>
+      <h2 className="font-heading text-[17px] font-bold tracking-[-0.02em]">{dm || conv.person ? `Just you and ${dm ? dm.name : conv.name}` : `This is the start of #${conv.name}`}</h2>
       <p className="text-muted-foreground">
         {dm
           ? `Anything you write here goes straight to ${dm.name}. What it makes shows up on the Stage.`

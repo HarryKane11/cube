@@ -346,7 +346,7 @@ export function Sidebar() {
           <InboxIcon width={17} height={17} />
           {waiting > 0 && <span className="absolute right-1 top-1 size-2 rounded-full bg-primary" />}
         </button>
-        <button type="button" aria-label="Library" title="Library" aria-current={view === "library" ? "page" : undefined} className={cn(railButton, view === "library" && "bg-secondary text-foreground")} onClick={openLibrary}>
+        <button type="button" aria-label="Library" title="Library" aria-current={view === "library" ? "page" : undefined} className={cn(railButton, view === "library" && "bg-secondary text-foreground")} onClick={() => openLibrary()}>
           <BookIcon width={17} height={17} />
         </button>
         <span className="my-1 h-px w-6 flex-none bg-border" />
@@ -402,7 +402,7 @@ export function Sidebar() {
         type="button"
         aria-current={view === "library" ? "page" : undefined}
         className={cn("flex min-h-[32px] items-center gap-2 rounded-[10px] px-2 text-left", view === "library" ? "bg-secondary font-semibold" : "hover:bg-accent")}
-        onClick={openLibrary}
+        onClick={() => openLibrary()}
       >
         <BookIcon className="mx-1.5 text-muted-foreground" width={16} height={16} /> Library
       </button>

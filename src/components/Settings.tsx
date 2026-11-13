@@ -141,7 +141,7 @@ export function SettingsView() {
   return (
     <main className="grid min-h-0 grid-cols-[212px_minmax(0,1fr)] overflow-hidden rounded-[22px] border bg-ground">
       <nav className="flex min-h-0 flex-col gap-0.5 overflow-auto border-r p-3 pt-6" aria-label="Settings" data-tauri-drag-region>
-        <h1 className="px-2.5 pb-3 font-heading text-[22px] font-bold leading-tight tracking-[-0.03em]">Settings</h1>
+        <h1 className="px-2.5 pb-3 font-heading text-[24px] font-bold leading-tight tracking-[-0.03em]">Settings</h1>
         {TABS.map((t) => (
           <button key={t.id} type="button" aria-current={tab === t.id ? "page" : undefined} className={cn("flex h-9 items-center gap-2.5 rounded-xl px-2.5 text-left text-[14px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground", tab === t.id && "bg-secondary font-semibold text-foreground")} onClick={() => pick(t.id)}>
             <t.icon width={17} height={17} className="flex-none" />
@@ -151,7 +151,7 @@ export function SettingsView() {
       </nav>
       <div className="min-h-0 overflow-auto" key={tab}>
       <div className="mx-auto flex max-w-[760px] flex-col gap-4 p-6" data-tauri-drag-region>
-        <h2 className="pt-2 font-heading text-[26px] font-bold leading-tight tracking-[-0.03em]">{TABS.find((t) => t.id === tab)?.name}</h2>
+        <h2 className="pt-2 font-heading text-[24px] font-bold leading-tight tracking-[-0.03em]">{TABS.find((t) => t.id === tab)?.name}</h2>
 
         {tab === "general" && (
           <>

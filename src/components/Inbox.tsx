@@ -94,7 +94,7 @@ export function Inbox() {
     <main className="min-h-0 overflow-auto rounded-[22px] border bg-ground">
       <div className="mx-auto flex max-w-[760px] flex-col gap-4 p-6" data-tauri-drag-region>
         <header className="flex items-end gap-3 pt-2">
-          <h1 className="flex-1 font-heading text-[30px] font-bold leading-tight tracking-[-0.03em]">Inbox</h1>
+          <h1 className="flex-1 font-heading text-[24px] font-bold leading-tight tracking-[-0.03em]">Inbox</h1>
           <div className="flex rounded-[10px] bg-secondary p-0.5" role="group" aria-label="What to show">
             <button type="button" aria-pressed={tab === "waiting"} className={seg(tab === "waiting")} onClick={() => setTab("waiting")}>Waiting on you{entries.length ? ` ${entries.length}` : ""}</button>
             <button type="button" aria-pressed={tab === "calls"} className={seg(tab === "calls")} onClick={() => setTab("calls")}>Calls cubes made</button>

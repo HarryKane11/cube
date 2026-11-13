@@ -1,10 +1,8 @@
-import { useMemo, useRef, useState, type ComponentType, type SVGProps } from "react";
+import { useMemo, useRef, useState } from "react";
 import { send } from "@/agents/orchestrator";
 import { AGENTS, ORCH, ROUTER, agentById, isLeadRole, type AgentDef, type Status } from "@/agents/types";
 import { timeOf } from "@/components/bits";
-import { ClockIcon, HashIcon, InboxIcon, RewindIcon, SendIcon, StageIcon } from "@/components/icons";
-import { Schedules } from "@/components/Schedules";
-import { Glyph } from "@/components/Glyph";
+import { ClockIcon, SendIcon, StageIcon } from "@/components/icons";
 import { Cube, CubeStill } from "@/cube/Cube";
 import { inboxEntries } from "@/lib/inbox";
 import { missedSince } from "@/lib/stats";
@@ -60,38 +58,29 @@ function LeadCube({ agent }: { agent: AgentDef }) {
   return <Cube color={agent.color} status={status} size={132} />;
 }
 
-type Tab = "todo" | "missed" | "schedules" | "files" | "channels";
-
 /** The landing view: the team, one box to ask it for something, and what waits on the person. */
 export function Home() {
   const name = useCube((s) => s.name);
   const convs = useCube((s) => s.convs);
   const messages = useCube((s) => s.messages);
   const files = useCube((s) => s.files);
-  const unread = useCube((s) => s.unread);
   const notes = useCube((s) => s.notes);
   const decisions = useCube((s) => s.decisions);
   const cleared = useCube((s) => s.cleared);
-  const schedules = useCube((s) => s.schedules);
+  const scheduled = useCube((s) => s.schedules.filter((x) => x.on).length);
   const seenAt = useCube((s) => s.seenAt);
   const setSeen = useCube((s) => s.setSeen);
   const setActive = useCube((s) => s.setActive);
-  const select = useCube((s) => s.select);
   const jumpTo = useCube((s) => s.jumpTo);
   const openProfile = useCube((s) => s.openProfile);
   const openInbox = useCube((s) => s.openInbox);
+  const openLibrary = useCube((s) => s.openLibrary);
   const [draft, setDraft] = useState("");
-  const [picked, setPicked] = useState<Tab>();
   const [leadHop, setLeadHop] = useState(false);
   const box = useRef<HTMLInputElement>(null);
 
   const todo = useMemo(() => inboxEntries({ messages, notes, decisions, cleared }), [messages, notes, decisions, cleared]);
   const missed = useMemo(() => missedSince(messages, files, convs, seenAt), [messages, files, convs, seenAt]);
-  const recent = useMemo(
-    () => convs.flatMap((c) => (files[c.id] ?? []).map((f) => ({ conv: c, file: f }))).sort((a, b) => b.file.mtime - a.file.mtime).slice(0, 8),
-    [convs, files],
-  );
-  const channels = convs.filter((c) => c.kind === "channel");
   const lead = agentById(ORCH);
   // The Router stands with the team, at the left end; the rest keep their order.
   const team = [...AGENTS.filter((a) => a.id === ROUTER), ...AGENTS.filter((a) => !isLeadRole(a.id))].slice(0, SPOTS.length);
@@ -103,17 +92,10 @@ export function Home() {
     setActive("general");
   };
 
-  const tabs: { id: Tab; name: string; icon: ComponentType<SVGProps<SVGSVGElement>>; count: number }[] = [
-    { id: "todo", name: "To do", icon: InboxIcon, count: todo.length },
-    { id: "missed", name: "While you were away", icon: RewindIcon, count: missed.length },
-    { id: "schedules", name: "Schedules", icon: ClockIcon, count: schedules.filter((s) => s.on).length },
-    { id: "files", name: "Files", icon: StageIcon, count: 0 },
-    { id: "channels", name: "Channels", icon: HashIcon, count: channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0) },
-  ];
-  // Until the person picks, show whatever has something in it, most pressing first.
-  const tab: Tab = picked ?? (todo.length ? "todo" : missed.length ? "missed" : "files");
   const row = "flex min-h-10 w-full items-center gap-2 rounded-xl px-1.5 text-left hover:bg-accent";
-  const empty = "py-3 text-center text-muted-foreground";
+  const label = "flex items-center justify-between px-1.5 pb-1 text-xs font-semibold text-muted-foreground";
+  const quiet = "flex h-7 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground";
+  const card = "flex flex-col rounded-[18px] border bg-background px-2.5 py-1.5";
 
   return (
     <main className="min-h-0 overflow-auto rounded-[22px] border bg-ground">
@@ -141,7 +123,7 @@ export function Home() {
           ))}
         </div>
 
-        <h1 className="text-center font-heading text-[28px] font-bold leading-tight tracking-[-0.03em]">{greeting()}, {name.trim() || "there"}</h1>
+        <h1 className="text-center font-heading text-[24px] font-bold leading-tight tracking-[-0.03em]">{greeting()}, {name.trim() || "there"}</h1>
 
         <form className="flex w-full max-w-[640px] items-center gap-2 rounded-[24px] border bg-background p-2 pl-5 shadow-sm focus-within:ring-2 focus-within:ring-ring" onSubmit={(e) => { e.preventDefault(); start(); }}>
           <input
@@ -151,7 +133,7 @@ export function Home() {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder="What should the team work on?"
-            className="selectable h-10 min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-muted-foreground"
+            className="selectable h-10 min-w-0 flex-1 bg-transparent text-[15px] outline-none placeholder:text-muted-foreground"
           />
           <button type="submit" aria-label="Send to #general" disabled={!draft.trim()} className="flex size-10 flex-none items-center justify-center rounded-full bg-primary text-primary-foreground disabled:opacity-35">
             <SendIcon width={18} height={18} strokeWidth={2.25} />
@@ -159,50 +141,41 @@ export function Home() {
         </form>
         <p className="-mt-3 text-xs text-muted-foreground">It goes to #general. Tap a cube to talk to it alone.</p>
 
-        <div className="flex flex-wrap justify-center gap-1.5" role="tablist" aria-label="What to look at">
-          {tabs.map((t) => (
-            <button
-              type="button"
-              key={t.id}
-              role="tab"
-              aria-selected={tab === t.id}
-              className={cn("flex h-9 items-center gap-1.5 rounded-full px-3.5 text-[13px] font-semibold", tab === t.id ? "bg-foreground text-background" : "bg-secondary text-muted-foreground hover:text-foreground")}
-              onClick={() => setPicked(t.id)}
-            >
-              <t.icon width={15} height={15} />
-              {t.name}
-              {t.count > 0 && <span className={cn("rounded-full px-1.5 text-[11px] leading-[18px] tabular-nums", tab === t.id ? "bg-background/20" : "bg-primary text-primary-foreground")}>{t.count}</span>}
-            </button>
-          ))}
-        </div>
-
-        <section className="w-full max-w-[640px] rounded-[22px] border bg-background px-4 py-3" role="tabpanel">
-          {tab === "todo" && (
-            todo.length === 0 ? <p className={empty}>Nothing to do right now. When a cube needs your OK, asks something or gets stuck, it shows up here.</p> : (
-              <ul className="flex flex-col">
+        {/* Under the box, only what waits on the person. Channels are in the sidebar; schedules and files are in the Library, one click from here. */}
+        <div className="flex w-full max-w-[640px] flex-col gap-4">
+          {todo.length > 0 && (
+            <section aria-label="Inbox">
+              <div className={label}>
+                <span>Inbox</span>
+                <button type="button" className={quiet} onClick={openInbox}>Open the inbox</button>
+              </div>
+              <ul className={card}>
                 {todo.slice(0, 5).map((e) => {
                   const a = agentById(e.agentId);
                   return (
                     <li key={e.id}>
                       <button type="button" className={row} onClick={() => (e.msgId ? jumpTo(e.msgId) : openInbox())}>
-                        {a && <CubeStill color={a.color} size={28} />}
+                        {a && <CubeStill color={a.color} size={24} />}
                         <span className="min-w-0 flex-1 truncate font-medium">{e.title}</span>
                         <span className="flex-none text-xs text-muted-foreground">{timeOf(e.ts)}</span>
                       </button>
                     </li>
                   );
                 })}
-                <li><button type="button" className="mt-1 h-8 rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={openInbox}>Open the inbox</button></li>
               </ul>
-            )
+            </section>
           )}
-          {tab === "missed" && (
-            missed.length === 0 ? <p className={empty}>Nothing new since you were last here.</p> : (
-              <ul className="flex flex-col">
+          {missed.length > 0 && (
+            <section aria-label="While you were away">
+              <div className={label}>
+                <span>While you were away</span>
+                <button type="button" className={quiet} onClick={() => setSeen(Date.now())}>Got it</button>
+              </div>
+              <ul className={card}>
                 {missed.map((m) => (
                   <li key={m.conv.id}>
                     <button type="button" className={row} onClick={() => setActive(m.conv.id)}>
-                      <span className="flex -space-x-2">{m.by.slice(0, 4).map((id) => { const a = agentById(id); return a ? <CubeStill key={id} color={a.color} size={26} /> : null; })}</span>
+                      <span className="flex -space-x-1.5">{m.by.slice(0, 4).map((id) => { const a = agentById(id); return a ? <CubeStill key={id} color={a.color} size={22} /> : null; })}</span>
                       <span className="font-medium">{m.conv.kind === "dm" ? m.conv.name : `#${m.conv.name}`}</span>
                       <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">
                         {[m.replies ? `${m.replies} ${m.replies === 1 ? "reply" : "replies"}` : "", m.files.length ? `${m.files.length} ${m.files.length === 1 ? "file" : "files"} changed` : ""].filter(Boolean).join(" · ")}
@@ -211,44 +184,21 @@ export function Home() {
                     </button>
                   </li>
                 ))}
-                <li><button type="button" className="mt-1 h-8 rounded-full bg-secondary px-3 text-[13px] font-semibold" onClick={() => setSeen(Date.now())}>Got it</button></li>
               </ul>
-            )
+            </section>
           )}
-          {tab === "schedules" && <Schedules />}
-          {tab === "files" && (
-            recent.length === 0 ? <p className={empty}>Files your team makes will be listed here, newest first.</p> : (
-              <ul className="flex flex-col">
-                {recent.map(({ conv, file }) => {
-                  const by = file.by ? agentById(file.by) : undefined;
-                  return (
-                    <li key={`${conv.id}/${file.rel}`}>
-                      <button type="button" className={row} onClick={() => { select(conv.id, file.rel, true); setActive(conv.id); }}>
-                        <Glyph kind={file.kind} name={file.rel} />
-                        <span className="min-w-0 flex-1 truncate font-medium">{file.rel}</span>
-                        <span className="flex-none truncate text-xs text-muted-foreground">{conv.kind === "dm" ? conv.name : `#${conv.name}`}{by && ` · ${by.name}`}</span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )
+          {todo.length === 0 && missed.length === 0 && (
+            <p className="text-center text-[13px] text-muted-foreground">Nothing to do right now. When a cube needs your OK, asks something or gets stuck, it shows up here.</p>
           )}
-          {tab === "channels" && (
-            <ul className="flex flex-col">
-              {channels.map((c) => (
-                <li key={c.id}>
-                  <button type="button" className={row} onClick={() => setActive(c.id)}>
-                    <HashIcon className="text-muted-foreground" width={16} height={16} />
-                    <span className="min-w-0 flex-1 truncate font-medium">{c.name}</span>
-                    <span className="flex -space-x-2">{c.members.slice(0, 7).map((id) => { const a = agentById(id); return a ? <CubeStill key={id} color={a.color} size={22} /> : null; })}</span>
-                    {(unread[c.id] ?? 0) > 0 && <span className="rounded-full bg-primary px-1.5 text-[11px] font-bold leading-[18px] text-primary-foreground tabular-nums">{unread[c.id]}</span>}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+          <div className="flex justify-center gap-1">
+            <button type="button" className={quiet} onClick={() => openLibrary("schedules")}>
+              <ClockIcon width={15} height={15} /> Schedules{scheduled > 0 && <span className="tabular-nums" data-notranslate>{scheduled}</span>}
+            </button>
+            <button type="button" className={quiet} onClick={() => openLibrary("files")}>
+              <StageIcon width={15} height={15} /> Files
+            </button>
+          </div>
+        </div>
       </div>
     </main>
   );

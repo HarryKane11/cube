@@ -332,7 +332,7 @@ export function Stage() {
   const pressed = "bg-secondary text-foreground";
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-col rounded-r-[22px] border bg-background px-4 pb-4" aria-label="Stage">
+    <section className="flex min-h-0 min-w-0 flex-col rounded-r-[22px] border bg-background px-3 pb-3" aria-label="Stage">
       {/* One row for the whole panel: what is open, and the other things the Stage can show. What belongs to the file in view sits with the file, below. */}
       <header className="flex min-h-[52px] items-center gap-1 px-0.5 py-2" data-tauri-drag-region>
         {artifacts.length > 0 && (
@@ -409,10 +409,11 @@ export function Stage() {
         )}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
         <FolderNotices conv={conv} count={artifacts.length} />
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[18px] border">
+        {/* The file sits straight on the panel: the panel is its frame, so it gets no second box of its own. */}
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[14px]">
           {/* About the file in view, and what can be done with it. */}
           {(current || onScreen) && (
-            <div className="flex h-10 flex-none items-center gap-2 border-b pl-3 pr-1.5 text-[13px]">
+            <div className="flex h-9 flex-none items-center gap-2 border-b pl-1.5 pr-0.5 text-[13px]">
               {theirs && about ? <Face pubkey={about.remote.pubkey} name={about.label} size={18} /> : author && <CubeStill color={author.color} size={18} />}
               <p className="min-w-0 flex-1 truncate text-muted-foreground" title={current ? current.rel : undefined}>
                 {onScreen ? (
@@ -468,7 +469,7 @@ export function Stage() {
             ) : (
               <div className="flex min-h-full flex-col items-center justify-center gap-2 p-8 text-center">
                 <Cube color="#C7C7CC" status="idle" size={120} />
-                <h3 className="font-heading text-lg font-bold tracking-[-0.02em]">Nothing on Stage yet</h3>
+                <h3 className="font-heading text-[17px] font-bold tracking-[-0.02em]">Nothing on Stage yet</h3>
                 <p className="max-w-[340px] text-muted-foreground">Ask a cube to make something: a doc, a page, a chart, some code. It opens here as soon as the file exists.</p>
                 {conv.dir && inTauri && <p className="font-mono text-xs text-muted-foreground">{conv.dir}</p>}
               </div>
