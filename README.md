@@ -18,7 +18,7 @@ Your agents are cube characters. You talk to them in channels like you would wit
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/readme/en/home-dark.webp" />
-  <img src="docs/readme/en/home-light.webp" alt="Cube's home screen: the team of cubes above a box that asks what the team should work on" width="100%" />
+  <img src="docs/readme/en/home-light.webp" alt="Cube's home screen: the cube above a box that asks what the team should work on, with workspaces, channels and cubes in the sidebar" width="100%" />
 </picture>
 
 </div>
@@ -29,7 +29,7 @@ Every cube is one role with one job. Its face and color follow what it is doing:
 
 | | Cube | What it does |
 |:-:|---|---|
-| <img src="docs/readme/cubes/router.png" width="56" alt="" /> | **Router** | The front desk. Answers questions about Cube itself and, when you name nobody, brings in the cube that should take the job. |
+| <img src="docs/readme/cubes/router.png" width="56" alt="" /> | **Cube** | The one you talk to. Answers what it can itself, learns how you like to work and talk, and brings in the cube that should take a job that is not its own. |
 | <img src="docs/readme/cubes/orchestrator.png" width="56" alt="" /> | **Orchestrator** | The lead. Splits a bigger job into steps, hands each step to a teammate, and reports back. |
 | <img src="docs/readme/cubes/researcher.png" width="56" alt="" /> | **Researcher** | Looks things up, compares sources, and says where each fact came from. |
 | <img src="docs/readme/cubes/writer.png" width="56" alt="" /> | **Writer** | Plans, briefs, summaries, emails and posts. |
@@ -37,11 +37,13 @@ Every cube is one role with one job. Its face and color follow what it is doing:
 | <img src="docs/readme/cubes/designer.png" width="56" alt="" /> | **Designer** | Pages, layouts, charts, slides and images. |
 | <img src="docs/readme/cubes/reviewer.png" width="56" alt="" /> | **Reviewer** | Reads what the others made, tests it, and says plainly what is wrong. |
 
-You can add your own cubes too: a sub-agent with its own instructions, a program you wrote, or an agent running somewhere else.
+Each cube holds the tool of its trade (a pencil, a magnifier, a wrench) and uses it while it works.
+
+You can add your own cubes too: a sub-agent that one of your agent programs sets up from a sentence of yours, a program you wrote, or an agent running somewhere else.
 
 ## See it work
 
-Ask in a channel. The Router decides who should take it, the Orchestrator plans it when it needs several hands, and the cubes pass work along with `@Name` like people do. Files land on the Stage as soon as they exist.
+Ask on Home, in a channel, or write to Cube directly. Cube answers or decides who should take it, the Orchestrator plans it when it needs several hands, and the cubes pass work along with `@Name` like people do. Files land on the Stage as soon as they exist.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/readme/en/work-dark.webp" />
@@ -54,9 +56,17 @@ Ask in a channel. The Router decides who should take it, the Orchestrator plans 
 
 **The Stage.** Each conversation has a folder on your Mac. Whatever a cube writes there opens beside the chat: documents, pages, sheets, code, images, notebooks. Edit it yourself, read what changed since you last spoke, or rewind the folder to an earlier point.
 
+**Workspaces: your own folders.** Open any folder on your Mac as a workspace, the way you open a project in a coding agent. Chats started there work in that folder directly, beside your own files. Cube keeps no copies of such a folder and never deletes it, so git is your way back.
+
 **Your own agents, on your own machine.** A cube runs on an agent program already installed and signed in on your Mac: Claude Code, Codex CLI or Hermes Agent. With only an API key (Anthropic, OpenAI or OpenRouter) a built-in agent takes the role. Pick a different one for each role.
 
 **You stay in charge.** Four modes decide how far cubes go without asking: Manual, Auto, Plan, Bypass. In a channel that other people write in, cubes ask before they run anything unless you say otherwise for that channel.
+
+**Work you can follow.** A longer job shows its plan and each step between the sentences as it happens. Every cube shows which program and model it runs on and how much of that plan is left; **Settings > Usage** has all of them.
+
+**Replies with views.** When a table, a chart, a few numbers or a short form says it better than a paragraph, a cube answers with one.
+
+**Make it yours.** Give Cube its own look: the flat mark or a cube that turns, a color for each face, a figure on its tiles. Add emoji of your own or bring your Slack workspace's, and the cubes react with them.
 
 **Pictures.** A cube that needs an image asks the Graphic Designer, which draws it with Codex and drops it into the conversation.
 
@@ -227,24 +237,25 @@ Needs `agent-browser` and `cwebp`.
 ```mermaid
 flowchart TD
   you([You]) --> conv[Channel or DM]
-  conv --> router{{Router}}
-  router -- "a question about Cube" --> self[answers it]
+  conv --> router{{Cube}}
+  router -- "something it can answer" --> self[answers it]
   router -- "one job" --> one[the right cube]
   router -- "several steps" --> orch[Orchestrator]
   orch --> team[Researcher · Writer · Builder · Designer · Reviewer]
   one --> cli
   team --> cli[agent CLI on your Mac]
-  cli --> folder[("a folder in ~/CubeSpaces")]
+  cli --> folder[("a folder in ~/CubeSpaces, or a folder you opened")]
   folder --> stage[Stage]
   folder <-->|shared channels| relay[(team relay)]
 ```
 
-Each conversation is a folder at `~/CubeSpaces/<conversation>`. Cubes run with that folder as their working directory, and any file they write there appears on the Stage.
+Each conversation is a folder at `~/CubeSpaces/<conversation>`, or, for a chat in a workspace, the folder you opened. Cubes run with that folder as their working directory, and any file they write there appears on the Stage.
 
 | Where | What |
 |---|---|
 | `src-tauri/src/lib.rs` | Starts agent CLIs as child processes, streams their output to the window, reads and writes files under `~/CubeSpaces` |
 | `src-tauri/src/update.rs`, `src/update/` | Updating from inside the app: asking the release page, checking the signature, replacing the app |
+| `src-tauri/src/workspace.rs` | The folders you opened as workspaces: only the system's folder dialog can add one |
 | `src-tauri/src/team.rs`, `drive.rs` | The connection to the team relay and the shared folder: signing, sending and fetching files |
 | `src/agents/adapters.ts` | Turns each CLI's output into the same small set of events |
 | `src/agents/orchestrator.ts` | The thread: who gets a message, `@Name` handoffs, stepping in, permissions |

@@ -92,13 +92,19 @@ ${[["52%", 52], ["54%", 54], ["55%", 55], ["58%", 58], ["61%", 61]].map(([t, h],
   ];
 
   const base = useCube.getState();
-  const dms = base.convs.filter((c) => c.kind === "dm");
+  // The one conversation with the whole team, then each cube's own.
+  const dms = base.convs.filter((c) => c.cube || c.kind === "dm");
+  // A folder of the person's own, opened as a workspace, with the chats that work in it.
+  const folder = "/Users/alex/dev/orbit-web";
+  const chat = (cid, name, h, m) => ({ id: cid, kind: "channel", chat: true, name, members: AGENTS.map((a) => a.id), dir: folder, workspace: folder, createdAt: at(h, m) });
+  const chats = [chat("chat-a", ko ? "결제 페이지 속도 개선" : "Make the checkout page faster", 9, 20), chat("chat-b", ko ? "로그인 테스트 추가" : "Add tests for sign-in", 8, 50)];
   const channel = (cid, name, extra = {}) => ({ id: cid, kind: "channel", name, members: AGENTS.map((a) => a.id), dir: `/preview/${cid}`, createdAt: 0, ...extra });
   const convs = [
     channel("general", "general"),
     channel(conv, ko ? "출시" : "launch", shared ? { shared: { id: "s1", since: 0, private: true, files: true, open: true } } : {}),
     channel("research", ko ? "리서치" : "research"),
     channel("design", ko ? "디자인" : "design-review"),
+    ...chats,
     ...dms,
   ];
   const file = (rel, kind, by, content, h, m) => ({ rel, path: `/preview/${conv}/${rel}`, kind, mtime: at(h, m), size: content.length, by, content });
@@ -124,6 +130,7 @@ ${[["52%", 52], ["54%", 54], ["55%", 55], ["58%", 58], ["61%", 61]].map(([t, h],
     name: names.me,
     settings: { ...base.settings, lang, theme, tree: true, sidebar: true, chatW: 500, treeW: 160 },
     convs,
+    workspaces: [{ dir: folder, name: "orbit-web", git: true }],
     messages: msgs,
     files: { [conv]: files },
     authors: Object.fromEntries(files.map((f) => [`${conv}:${f.rel}`, f.by])),

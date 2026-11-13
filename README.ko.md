@@ -18,7 +18,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/readme/ko/home-dark.webp" />
-  <img src="docs/readme/ko/home-light.webp" alt="Cube 홈 화면. 큐브 팀이 위에 있고, 그 아래에 팀에게 맡길 일을 적는 입력창이 있다" width="100%" />
+  <img src="docs/readme/ko/home-light.webp" alt="Cube 홈 화면. 큐브 아래에 팀에게 맡길 일을 적는 입력창이 있고, 사이드바에 워크스페이스와 채널, 큐브 목록이 있다" width="100%" />
 </picture>
 
 </div>
@@ -29,7 +29,7 @@
 
 | | 큐브 | 하는 일 |
 |:-:|---|---|
-| <img src="docs/readme/cubes/router.png" width="56" alt="" /> | **Router** | 안내 데스크. Cube에 대한 질문은 직접 답하고, 누구에게 시킬지 정하지 않은 일은 맞는 큐브를 불러옵니다. |
+| <img src="docs/readme/cubes/router.png" width="56" alt="" /> | **Cube** | 내가 말을 거는 큐브. 답할 수 있는 건 직접 답하고, 내가 일하고 말하는 방식을 익혀 가며, 자기 일이 아닌 건 맞는 큐브를 불러옵니다. |
 | <img src="docs/readme/cubes/orchestrator.png" width="56" alt="" /> | **Orchestrator** | 팀장. 큰 일을 단계로 나눠 팀원에게 맡기고 결과를 정리해 알려 줍니다. |
 | <img src="docs/readme/cubes/researcher.png" width="56" alt="" /> | **Researcher** | 자료를 찾고 출처를 비교해서, 어디서 나온 사실인지 함께 알려 줍니다. |
 | <img src="docs/readme/cubes/writer.png" width="56" alt="" /> | **Writer** | 계획서, 요약, 메일, 공지 같은 글을 씁니다. |
@@ -37,11 +37,13 @@
 | <img src="docs/readme/cubes/designer.png" width="56" alt="" /> | **Designer** | 페이지, 레이아웃, 차트, 슬라이드, 이미지를 만듭니다. |
 | <img src="docs/readme/cubes/reviewer.png" width="56" alt="" /> | **Reviewer** | 다른 큐브가 만든 것을 읽고 테스트해서, 뭐가 틀렸는지 그대로 말합니다. |
 
-큐브는 직접 추가할 수도 있습니다. 지시문을 따로 준 서브 에이전트, 직접 만든 프로그램, 다른 곳에서 돌아가는 에이전트를 팀에 넣을 수 있습니다.
+큐브는 저마다 자기 일에 쓰는 도구(연필, 돋보기, 렌치)를 들고 있고, 일하는 동안 그 도구를 씁니다.
+
+큐브는 직접 추가할 수도 있습니다. 한 문장으로 설명하면 에이전트 프로그램이 알아서 설정해 주는 서브 에이전트, 직접 만든 프로그램, 다른 곳에서 돌아가는 에이전트를 팀에 넣을 수 있습니다.
 
 ## 이렇게 일합니다
 
-채널에 요청을 적으면 됩니다. Router가 누가 맡을지 정하고, 여러 명이 필요한 일은 Orchestrator가 계획을 세웁니다. 큐브끼리는 사람처럼 `@이름`으로 일을 넘깁니다. 파일은 만들어지는 대로 스테이지에 뜹니다.
+홈이나 채널에 요청을 적거나, Cube에게 바로 말을 걸면 됩니다. Cube가 직접 답하거나 누가 맡을지 정하고, 여러 명이 필요한 일은 Orchestrator가 계획을 세웁니다. 큐브끼리는 사람처럼 `@이름`으로 일을 넘깁니다. 파일은 만들어지는 대로 스테이지에 뜹니다.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/readme/ko/work-dark.webp" />
@@ -54,9 +56,17 @@
 
 **스테이지.** 대화마다 내 Mac에 폴더가 하나씩 있습니다. 큐브가 그 폴더에 쓴 문서, 페이지, 시트, 코드, 이미지, 노트북이 채팅 옆에 바로 열립니다. 직접 고칠 수 있고, 마지막 메시지 이후 바뀐 부분만 볼 수 있고, 폴더를 이전 시점으로 되돌릴 수도 있습니다.
 
+**워크스페이스: 내 폴더에서 작업.** 코딩 에이전트에서 프로젝트를 열듯이, 내 Mac의 폴더를 워크스페이스로 엽니다. 거기서 시작한 대화는 내 파일이 있는 그 폴더에서 바로 작업합니다. Cube는 이런 폴더의 복사본을 남기지 않고 지우지도 않으니, 되돌릴 때는 git을 씁니다.
+
 **내 Mac의 내 에이전트.** 큐브는 내 Mac에 설치해 로그인해 둔 에이전트 프로그램으로 돌아갑니다. Claude Code, Codex CLI, Hermes Agent를 지원하고, API 키(Anthropic, OpenAI, OpenRouter)만 있어도 내장 에이전트가 역할을 맡습니다. 역할마다 다른 프로그램을 고를 수 있습니다.
 
 **결정은 내가 합니다.** 큐브가 묻지 않고 어디까지 진행할지를 네 가지 모드(수동, 자동, 계획, 권한 무시)로 정합니다. 다른 사람이 글을 쓰는 채널에서는 그 채널에 대해 따로 정하지 않는 한 큐브가 실행 전에 먼저 묻습니다.
+
+**따라갈 수 있는 작업.** 긴 작업은 계획과 각 단계가 문장 사이에 진행 순서대로 보입니다. 큐브마다 어떤 프로그램과 모델로 돌아가는지, 그 플랜이 얼마나 남았는지 표시되고, **설정 > 사용량**에서 한꺼번에 볼 수 있습니다.
+
+**화면으로 답하기.** 표, 차트, 숫자 몇 개, 짧은 입력 폼이 문단보다 나을 때는 큐브가 그걸로 답합니다.
+
+**내 취향대로.** Cube의 모양을 정할 수 있습니다. 평면 로고나 돌아가는 큐브, 면마다 다른 색, 칸에 넣는 문양. 내 이모지를 추가하거나 Slack 워크스페이스의 이모지를 가져오면 큐브가 그걸로 반응합니다.
 
 **이미지.** 그림이 필요한 큐브는 Graphic Designer에게 부탁합니다. Codex로 그려서 대화에 바로 올려 줍니다.
 
@@ -227,24 +237,25 @@ bash scripts/readme/shoot.sh   # 다른 터미널에서. docs/readme/에 저장
 ```mermaid
 flowchart TD
   you([나]) --> conv[채널 또는 DM]
-  conv --> router{{Router}}
-  router -- "Cube에 대한 질문" --> self[직접 답함]
+  conv --> router{{Cube}}
+  router -- "답할 수 있는 것" --> self[직접 답함]
   router -- "한 명이면 되는 일" --> one[맞는 큐브]
   router -- "여러 단계" --> orch[Orchestrator]
   orch --> team[Researcher · Writer · Builder · Designer · Reviewer]
   one --> cli
   team --> cli[내 Mac의 에이전트 CLI]
-  cli --> folder[("~/CubeSpaces 안의 폴더")]
+  cli --> folder[("~/CubeSpaces 안의 폴더, 또는 내가 연 폴더")]
   folder --> stage[스테이지]
   folder <-->|공유 채널| relay[(팀 릴레이)]
 ```
 
-대화마다 `~/CubeSpaces/<대화>` 폴더가 있습니다. 큐브는 그 폴더를 작업 디렉터리로 삼아 실행되고, 거기에 쓴 파일이 스테이지에 나타납니다.
+대화마다 `~/CubeSpaces/<대화>` 폴더가 있고, 워크스페이스에서 시작한 대화는 내가 연 폴더를 씁니다. 큐브는 그 폴더를 작업 디렉터리로 삼아 실행되고, 거기에 쓴 파일이 스테이지에 나타납니다.
 
 | 위치 | 내용 |
 |---|---|
 | `src-tauri/src/lib.rs` | 에이전트 CLI를 자식 프로세스로 띄우고, 출력을 창으로 스트리밍하고, `~/CubeSpaces` 아래 파일을 읽고 씁니다 |
 | `src-tauri/src/update.rs`, `src/update/` | 앱 안에서 하는 업데이트. 릴리스 페이지 확인, 서명 검사, 앱 교체 |
+| `src-tauri/src/workspace.rs` | 워크스페이스로 연 폴더. 시스템의 폴더 선택 창으로만 추가할 수 있습니다 |
 | `src-tauri/src/team.rs`, `drive.rs` | 팀 릴레이 연결과 공유 폴더. 서명, 파일 올리기와 받기 |
 | `src/agents/adapters.ts` | CLI마다 다른 출력을 같은 이벤트 몇 가지로 바꿉니다 |
 | `src/agents/orchestrator.ts` | 스레드. 누가 메시지를 받는지, `@이름` 넘기기, 끼어들기, 권한 |
