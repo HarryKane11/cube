@@ -2,7 +2,7 @@ import { ADAPTERS } from "./adapters";
 import { startBuiltin } from "./builtin";
 import { isEditTool } from "./permissions";
 import { endInput, inTauri, startProcess, stopProcess, writeProcess } from "./runner";
-import type { AgentKind, Ev, RunOpts } from "./types";
+import type { AgentKind, Ev, Fence, RunOpts } from "./types";
 
 /** The engines that can do work without a conversation: the three programs and the built-in agent. */
 export type HeadlessEngine = Exclude<AgentKind, "custom" | "remote">;
@@ -18,14 +18,14 @@ export interface HeadlessResult {
  * said. It may change files in that folder; whatever else it asks leave for is refused, since
  * nobody is there to answer.
  */
-export function runHeadless(o: { engine: HeadlessEngine; model?: string; effort?: string; cwd: string; prompt: string; onActivity?(label: string): void }): { done: Promise<HeadlessResult>; stop(): void } {
+export function runHeadless(o: { engine: HeadlessEngine; model?: string; effort?: string; cwd: string; prompt: string; fence?: Fence; onActivity?(label: string): void }): { done: Promise<HeadlessResult>; stop(): void } {
   const runId = `bg-${crypto.randomUUID()}`;
   let text = "";
   let error: string | undefined;
   let stop = () => {};
   let answer: (id: string, allow: boolean, input: unknown) => void = () => {};
   // Codex is boxed into the folder by its own sandbox and never asks. The others may edit files and ask for the rest.
-  const opts: RunOpts = { model: o.model?.trim() || undefined, effort: o.effort || undefined, plain: false, trust: o.engine === "codex" ? "auto" : "edits" };
+  const opts: RunOpts = { model: o.model?.trim() || undefined, effort: o.effort || undefined, plain: false, trust: o.engine === "codex" ? "auto" : "edits", fence: o.fence };
 
   const done = new Promise<HeadlessResult>((resolve) => {
     let over = false;
@@ -73,7 +73,7 @@ export function runHeadless(o: { engine: HeadlessEngine; model?: string; effort?
         else parser.exit(code).forEach(onEv);
         finish();
       }
-    }, started.input).catch((e) => {
+    }, started.input, o.fence).catch((e) => {
       error = String(e);
       finish();
     });

@@ -5,7 +5,7 @@ import { ENGINES, MODEL_HINTS } from "@/agents/types";
 import { BrandMark, RichText } from "@/components/bits";
 import { Section, Switch } from "@/components/Settings";
 import { Input } from "@/components/ui/input";
-import { exportKnowledge, importKnowledge, JOB_ABOUT, JOBS, knowledgeEngine, listKnowledge, runJob, stopJob, type JobKind, WIKI_CHOICES, WIKI_EVERY } from "@/knowledge";
+import { engineIsAuto, exportKnowledge, importKnowledge, JOB_ABOUT, JOBS, knowledgeEngine, knowledgeModel, listKnowledge, runJob, stopJob, type JobKind, WIKI_CHOICES, WIKI_EVERY } from "@/knowledge";
 import { cn } from "@/lib/utils";
 import { useCube } from "@/state/store";
 
@@ -22,20 +22,29 @@ const ago = (ts: number | undefined) => {
   return new Date(ts).toLocaleDateString();
 };
 
-/** Which agent program and model do the background work. Nothing runs by itself until one is picked. */
+/** Which agent program and model do the background work. Until the person picks one, Cube picks an installed program and a small model. */
 function WorkModel() {
   const k = useCube((s) => s.knowledge);
   const available = useCube((s) => s.available);
   const set = useCube((s) => s.setKnowledge);
   const usable = HEADLESS.filter((e) => available[e]);
+  const auto = engineIsAuto();
+  const chosen = knowledgeEngine();
+  const small = knowledgeModel().model;
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b py-3">
         <div className="min-w-[200px] flex-1">
           <div className="font-medium">Runs on</div>
           <div className="text-[13px] text-muted-foreground">The agent program that reads your conversations and writes memory, skills and the wiki. It works in the knowledge folder only.</div>
+          {auto && chosen && <div className="mt-1 text-[13px] text-muted-foreground">Picked for you: <span data-notranslate>{PROGRAM[chosen] ?? chosen}{small ? ` · ${small}` : ""}</span></div>}
         </div>
         <div className="flex rounded-[10px] bg-secondary p-0.5" role="group" aria-label="Agent program for background work">
+          {usable.length > 0 && (
+            <button type="button" aria-pressed={auto} className={cn("flex h-7 items-center rounded-lg px-2.5 text-[13px] font-medium text-muted-foreground", auto && "bg-background font-semibold text-foreground shadow-sm")} onClick={() => set({ engine: "", model: "" })}>
+              Automatic
+            </button>
+          )}
           {usable.map((e) => (
             <button key={e} type="button" aria-pressed={k.engine === e} className={cn("flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[13px] font-medium text-muted-foreground", k.engine === e && "bg-background font-semibold text-foreground shadow-sm")} onClick={() => set({ engine: e as HeadlessEngine, model: k.engine === e ? k.model : "" })}>
               <BrandMark kind={e} className="size-3" /> {ENGINES[e].name.split(" ")[0]}
@@ -49,10 +58,10 @@ function WorkModel() {
           <div className="font-medium">Model</div>
           <div className="text-[13px] text-muted-foreground">Leave empty to use the program's own default. A small, fast model is enough for this work.</div>
         </div>
-        <Input autoCapitalize="off" autoCorrect="off" spellCheck={false} aria-label="Model for background work" list="knowledge-models" placeholder={k.engine ? "Program default" : "Pick a program first"} disabled={!k.engine} value={k.model} onChange={(e) => set({ model: e.target.value })} className="selectable h-9 w-[240px]" data-notranslate />
+        <Input autoCapitalize="off" autoCorrect="off" spellCheck={false} aria-label="Model for background work" list="knowledge-models" placeholder={auto ? "Picked for you" : "Program default"} disabled={auto} value={k.model} onChange={(e) => set({ model: e.target.value })} className="selectable h-9 w-[240px]" data-notranslate />
         <datalist id="knowledge-models">{(k.engine ? MODEL_HINTS[k.engine] : []).map((m) => <option key={m} value={m} />)}</datalist>
       </div>
-      <Switch label="Keep it up by itself" hint="Memory after a conversation goes quiet, the wiki when memory changed, skills when enough new work has piled up. Off: only when you press Run." checked={k.auto} onChange={(auto) => set({ auto })} />
+      <Switch label="Keep it up by itself" hint="Memory after a conversation goes quiet, dreaming while Cube is idle, the wiki when memory changed, skills when enough new work has piled up. Off: only when you press Run." checked={k.auto} onChange={(on) => set({ auto: on })} />
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t py-3">
         <div className="min-w-[200px] flex-1">
           <label htmlFor="wiki-every" className="font-medium">How often the wiki is rewritten</label>
@@ -69,7 +78,7 @@ function WorkModel() {
 function Jobs() {
   const k = useCube((s) => s.knowledge);
   const busy = useCube((s) => s.knowledgeBusy);
-  const ready = useCube((s) => Boolean(s.knowledge.engine && s.available[s.knowledge.engine]));
+  const ready = useCube((s) => Boolean((s.knowledge.engine && s.available[s.knowledge.engine]) || s.available.claude || s.available.codex));
   const set = useCube((s) => s.setKnowledge);
   return (
     <div className="flex flex-col">
@@ -89,14 +98,14 @@ function Jobs() {
               ? <button type="button" className={pill} onClick={stopJob}>Stop</button>
               : (
                 <div className="flex gap-2">
-                  {job !== "wiki" && k.cursor[job] > 0 && <button type="button" className={pill} disabled={Boolean(busy)} title="Read every conversation again on the next run, not only what is new" onClick={() => set({ cursor: { ...k.cursor, [job]: 0 } })}>Read all again</button>}
+                  {(job === "memory" || job === "skills") && k.cursor[job] > 0 && <button type="button" className={pill} disabled={Boolean(busy)} title="Read every conversation again on the next run, not only what is new" onClick={() => set({ cursor: { ...k.cursor, [job]: 0 } })}>Read all again</button>}
                   <button type="button" className={pill} disabled={Boolean(busy) || !ready} onClick={() => void runJob(job)}>Run now</button>
                 </div>
               )}
           </div>
         );
       })}
-      {!ready && <p className="pt-2 text-[13px] text-muted-foreground">Pick the agent program above to turn these on.</p>}
+      {!ready && <p className="pt-2 text-[13px] text-muted-foreground">Install Claude Code or Codex, or pick a program above, to turn these on.</p>}
     </div>
   );
 }
@@ -124,7 +133,7 @@ function Bridge({ listing, reload }: { listing: KnowledgeListing | null; reload:
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3">
         <div className="min-w-[200px] flex-1">
           <div className="font-medium">Send out</div>
-          <div className="text-[13px] text-muted-foreground">Writes Cube's memory and skills where each program reads them: a rules file for Claude Code, a marked block in Codex's AGENTS.md, a skill for Hermes; skills as cube-… in each. Only what Cube wrote before is replaced.</div>
+          <div className="text-[13px] text-muted-foreground">Writes Cube's memory and skills where each program reads them: a rules file for Claude Code, a skill for Codex and Hermes; skills as cube-… in each. Only what Cube wrote before is replaced.</div>
         </div>
         <button type="button" className={primary} disabled={Boolean(busy)} onClick={() => run("out", async () => (await exportKnowledge()).map((r) => `${PROGRAM[r.target] ?? r.target}: ${r.memory}${r.skills ? ` · ${r.skills} skills` : ""}`))}>{busy === "out" ? "Sending out…" : "Send out to all three"}</button>
       </div>

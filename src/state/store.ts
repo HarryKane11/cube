@@ -18,6 +18,7 @@ import type { Lang } from "../i18n";
 import { kindOf, type FileKind } from "../lib/files";
 import type { Schedule } from "../lib/schedule";
 import type { Baseline } from "../lib/tree";
+import { keepsOwnMemory, ofConv } from "../knowledge/scope";
 
 /** A channel with several agents, or a direct message with one. Each has its own folder on disk. */
 export interface Conv {
@@ -348,7 +349,7 @@ function syncSubagents(subs: SubAgent[]): void {
 
 /** How Cube keeps its memory, skills and wiki. */
 export interface KnowledgeState {
-  /** The agent program background work runs on. Empty until the person picks one; nothing runs by itself before that. */
+  /** The agent program background work runs on. Empty: Cube picks one that is installed (see knowledgeEngine). */
   engine: "" | HeadlessEngine;
   model: string;
   /** Keep memory, skills and the wiki up to date without being asked. */
@@ -359,6 +360,10 @@ export interface KnowledgeState {
   last: Partial<Record<JobKind, number>>;
   /** The time of the last conversation line each job has read. */
   cursor: { memory: number; skills: number };
+  /** Per channel, the time of the last line of this person's side its memory was kept up to. */
+  channels?: Record<string, number>;
+  /** When dreaming last went over each memory: "personal", "team", or a channel's id. Compared with the newest note in it. */
+  dreamed?: Record<string, number>;
   /** When memory last changed, which is what gives the wiki something to do. */
   memoryChangedAt: number;
   /** Notes brought in from other programs are waiting to be worked into memory. */
@@ -509,6 +514,11 @@ interface CubeState {
   messages: Msg[];
   /** `${convId}:${agentId}:${engine}` → that agent's own session id, so it keeps its memory between turns. */
   sessions: Record<string, string>;
+  /** Set once the sessions of channels from before memory was kept by conversation have been started over. */
+  memoryScoped?: boolean;
+  /** What holds across the team, as kept on this Mac (see knowledge/index.ts). Not saved: read again at every start. */
+  teamMemory?: { dir: string; count: number };
+  setTeamMemory(team: { dir: string; count: number }): void;
   /** `${convId}:${rel}` → the agent that last wrote the file. */
   authors: Record<string, string>;
   live: Record<string, Live>;
@@ -810,12 +820,18 @@ export const useCube = create<CubeState>()(
           return { driveBase: { ...s.driveBase, [convId]: next } };
         }),
       setDriveLive: (convId, patch) => set((s) => ({ driveLive: { ...s.driveLive, [convId]: { ...(s.driveLive[convId] ?? NO_DRIVE), ...patch } } })),
-      setConvShared: (convId, shared) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, shared } : c)) })),
+      // A channel being shared starts its cubes' sessions over: what they were told before may hold the person's own memory, and from now on other people read what they say.
+      setConvShared: (convId, shared) =>
+        set((s) => ({
+          convs: s.convs.map((c) => (c.id === convId ? { ...c, shared } : c)),
+          ...(shared && !s.convs.find((c) => c.id === convId)?.shared ? { sessions: dropConv(s.sessions, convId), told: dropConv(s.told, convId) } : {}),
+        })),
       setConvPerson: (convId, person) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, person } : c)) })),
       renameConv: (convId, name) => set((s) => ({ convs: s.convs.map((c) => (c.id === convId ? { ...c, name } : c)) })),
       setSlackLive: (patch) => set((s) => ({ slackLive: { ...s.slackLive, ...patch } })),
       setKnowledge: (patch) => set((s) => ({ knowledge: { ...s.knowledge, ...patch } })),
       setKnowledgeBusy: (knowledgeBusy) => set({ knowledgeBusy }),
+      setTeamMemory: (teamMemory) => set({ teamMemory }),
       setKnowledgePlace: (knowledgeDir, knowledgeCount) => set({ knowledgeDir, knowledgeCount }),
       addKnowledgeRun: (run) => set((s) => ({ knowledge: { ...s.knowledge, runs: [run, ...s.knowledge.runs].slice(0, 30) } })),
       putRemote: (agent) => set((s) => ({ remotes: [...s.remotes.filter((r) => r.id !== agent.id), agent], available: { ...s.available, remote: true } })),
@@ -1063,6 +1079,7 @@ export const useCube = create<CubeState>()(
         authors: s.authors,
         driveBase: s.driveBase,
         unread: s.unread,
+        memoryScoped: s.memoryScoped,
       }),
       merge: (saved, current) => {
         const p = (saved ?? {}) as Partial<CubeState>;
@@ -1076,9 +1093,13 @@ export const useCube = create<CubeState>()(
         // A workspace from before there was a conversation with the whole team gets one, after its channels.
         const at = kept.findIndex((c) => c.kind === "dm");
         const convs = kept.some((c) => c.id === CUBE_DM) ? kept : [...kept.slice(0, at < 0 ? kept.length : at), cubeConv(), ...kept.slice(at < 0 ? kept.length : at)];
+        // Before memory was kept by conversation, every cube in a channel was told the person's own memory. Those sessions start over once.
+        const scoped = p.memoryScoped ? {} : forgetChannelSessions(convs, p.sessions ?? {}, p.told ?? {});
         return {
           ...current,
           ...p,
+          ...scoped,
+          memoryScoped: true,
           settings: { ...current.settings, ...(p.settings ?? {}) },
           convs,
           activeId: convs.some((c) => c.id === p.activeId) ? (p.activeId as string) : convs[0].id,
@@ -1092,6 +1113,18 @@ export const useCube = create<CubeState>()(
     },
   ),
 );
+
+/** A record keyed by `${convId}:…` without one conversation's keys. */
+function dropConv<T>(rec: Record<string, T>, convId: string): Record<string, T> {
+  return Object.fromEntries(Object.entries(rec).filter(([k]) => !ofConv(k, convId)));
+}
+
+/** The sessions and what they were told, without those of conversations that keep their own memory. */
+export function forgetChannelSessions(convs: Conv[], sessions: Record<string, string>, told: Record<string, string[]>): { sessions: Record<string, string>; told: Record<string, string[]> } {
+  let out = { sessions, told };
+  for (const c of convs.filter(keepsOwnMemory)) out = { sessions: dropConv(out.sessions, c.id), told: dropConv(out.told, c.id) };
+  return out;
+}
 
 function withTab(tabs: string[] | undefined, rel: string | undefined): string[] {
   const list = tabs ?? [];

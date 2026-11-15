@@ -17,7 +17,7 @@ const DIGEST_LIMIT: usize = 12_000;
 const BLOCK_START: &str = "<!-- cube:memory:start -->";
 const BLOCK_END: &str = "<!-- cube:memory:end -->";
 /// Left inside a skill folder Cube wrote, so only those are ever replaced or removed.
-const MARKER: &str = ".cube-managed";
+pub const MARKER: &str = ".cube-managed";
 
 #[derive(Serialize, Default, Debug, PartialEq)]
 pub struct Imported {
@@ -209,13 +209,46 @@ fn count_notes(know: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// A file's text with Cube's block replaced, or added at the end. The rest is kept byte for byte.
-pub fn with_block(existing: &str, inner: &str) -> String {
-    let block = format!("{BLOCK_START}\n{}\n{BLOCK_END}", inner.trim());
-    match (existing.find(BLOCK_START), existing.find(BLOCK_END)) {
-        (Some(a), Some(b)) if b > a => format!("{}{}{}", &existing[..a], block, &existing[b + BLOCK_END.len()..]),
-        _ if existing.trim().is_empty() => format!("{block}\n"),
-        _ => format!("{}\n\n{block}\n", existing.trim_end()),
+/// Writes Cube's memory as a skill named cube-memory in `dir`, unless a skill of that name that
+/// Cube did not write is already there. Returns what to report.
+fn memory_skill(dir: &Path, text: &str, has_notes: bool) -> Result<String, String> {
+    if !has_notes {
+        return Ok("No notes to export yet.".to_string());
+    }
+    if dir.exists() && !dir.join(MARKER).is_file() {
+        return Ok("A skill named cube-memory that Cube did not write is already there.".to_string());
+    }
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let skill = format!("---\nname: cube-memory\ndescription: What the Cube workspace has learned about the person, their projects and how they like work done. Read it when you need that context.\n---\n\n{text}");
+    fs::write(dir.join("SKILL.md"), skill).map_err(|e| e.to_string())?;
+    fs::write(dir.join(MARKER), "Written by Cube. Replaced on every export.\n").map_err(|e| e.to_string())?;
+    Ok(dir.join("SKILL.md").display().to_string())
+}
+
+/// A file's text without Cube's block, the rest kept as it was. None when there is no block.
+pub fn without_block(existing: &str) -> Option<String> {
+    let (a, b) = (existing.find(BLOCK_START)?, existing.find(BLOCK_END)?);
+    if b < a {
+        return None;
+    }
+    let before = existing[..a].trim_end();
+    let after = existing[b + BLOCK_END.len()..].trim_start();
+    Some(match (before.is_empty(), after.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!("{before}\n"),
+        (true, false) => after.to_string(),
+        (false, false) => format!("{before}\n\n{after}"),
+    })
+}
+
+/// Takes out the block of memory earlier versions of Cube put in ~/.codex/AGENTS.md. Called on
+/// every export and when the app opens, so a Codex run in a shared conversation never reads it.
+pub fn retire_codex_block(home: &Path) -> Result<(), String> {
+    let file = home.join(".codex/AGENTS.md");
+    let Ok(existing) = fs::read_to_string(&file) else { return Ok(()) };
+    match without_block(&existing) {
+        Some(rest) => fs::write(&file, rest).map_err(|e| e.to_string()),
+        None => Ok(()),
     }
 }
 
@@ -290,35 +323,18 @@ pub fn export_from(home: &Path, know: &Path, targets: &[String]) -> Result<Vec<E
                 };
                 Exported { target: target.clone(), memory, skills: export_skills(know, &home.join(".claude/skills"), &[])? }
             }
-            // Codex reads AGENTS.md: Cube keeps one marked block in it and leaves the rest alone.
+            // Codex reads all of AGENTS.md into every session, those in shared conversations too, and a
+            // fenced run cannot be kept from half of a file. So Cube's memory goes to Codex as a skill
+            // it opens when it needs the context, as for Hermes, and AGENTS.md is left as the person wrote it.
             "codex" if home.join(".codex").is_dir() => {
-                let file = home.join(".codex/AGENTS.md");
-                let memory = if has_notes {
-                    let existing = fs::read_to_string(&file).unwrap_or_default();
-                    fs::write(&file, with_block(&existing, &text)).map_err(|e| e.to_string())?;
-                    file.display().to_string()
-                } else {
-                    "No notes to export yet.".to_string()
-                };
-                Exported { target: target.clone(), memory, skills: export_skills(know, &home.join(".codex/skills"), &[])? }
+                retire_codex_block(home)?;
+                let memory = memory_skill(&home.join(".codex/skills/cube-memory"), &text, has_notes)?;
+                Exported { target: target.clone(), memory, skills: export_skills(know, &home.join(".codex/skills"), &["cube-memory"])? }
             }
             // Hermes keeps its own memory in two small files with a size limit, so Cube does not
             // write there: its memory goes in as a skill Hermes opens when it needs the context.
             "hermes" if home.join(".hermes").is_dir() => {
-                let dir = home.join(".hermes/skills/cube/cube-memory");
-                let memory = if has_notes {
-                    if !dir.exists() || dir.join(MARKER).is_file() {
-                        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-                        let skill = format!("---\nname: cube-memory\ndescription: What the Cube workspace has learned about the person, their projects and how they like work done. Read it when you need that context.\n---\n\n{text}");
-                        fs::write(dir.join("SKILL.md"), skill).map_err(|e| e.to_string())?;
-                        fs::write(dir.join(MARKER), "Written by Cube. Replaced on every export.\n").map_err(|e| e.to_string())?;
-                        dir.join("SKILL.md").display().to_string()
-                    } else {
-                        "A skill named cube-memory that Cube did not write is already there.".to_string()
-                    }
-                } else {
-                    "No notes to export yet.".to_string()
-                };
+                let memory = memory_skill(&home.join(".hermes/skills/cube/cube-memory"), &text, has_notes)?;
                 Exported { target: target.clone(), memory, skills: export_skills(know, &home.join(".hermes/skills/cube"), &["cube-memory"])? }
             }
             "claude" | "codex" | "hermes" => Exported { target: target.clone(), memory: "This program is not set up on this computer.".into(), skills: 0 },
@@ -612,6 +628,124 @@ pub async fn knowledge_remove(rels: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// The folder, inside a channel's folder, where what the channel has learned is kept. It goes
+/// with the folder to everyone in the channel; its `.inbox` does not, being hidden.
+pub const CHANNEL_MEMORY: &str = "cube-memory";
+
+/// A channel's memory folder, made if needed. The channel folder must be one directly under
+/// ~/CubeSpaces: a workspace is the person's own folder and keeps no memory of Cube's.
+fn channel_memory(conv_dir: &Path, root: &Path) -> Result<PathBuf, String> {
+    let base = conv_dir.canonicalize().map_err(|e| e.to_string())?;
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    if base.parent() != Some(root.as_path()) || base.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+        return Err("That is not a conversation folder.".into());
+    }
+    let dir = base.join(CHANNEL_MEMORY);
+    fs::create_dir_all(dir.join(".inbox")).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Puts new conversation into a channel memory's inbox for the memory job. Returns the memory
+/// folder and the inbox file, relative to it.
+pub fn channel_inbox(conv_dir: &Path, root: &Path, text: &str, stamp: u64) -> Result<(String, String), String> {
+    let dir = channel_memory(conv_dir, root)?;
+    let rel = format!(".inbox/memory-{stamp}.md");
+    fs::write(dir.join(&rel), text).map_err(|e| e.to_string())?;
+    Ok((dir.to_string_lossy().into_owned(), rel))
+}
+
+/// After a job in a memory folder: the inbox file it read goes, and so do the notes it marked DELETE.
+fn tidy(dir: &Path, read: Option<&str>) -> Result<(), String> {
+    if let Some(name) = read.and_then(|r| r.strip_prefix(".inbox/")) {
+        if name.is_empty() || name.contains('/') || name.contains("..") {
+            return Err("That is not an inbox file.".into());
+        }
+        let _ = fs::remove_file(dir.join(".inbox").join(name));
+    }
+    for e in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+        let p = e.path();
+        if p.is_file() && is_md(&p) && is_marked(&p) {
+            fs::remove_file(&p).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// After a channel's memory job: the inbox it read goes, and so do the notes it marked DELETE.
+pub fn channel_tidy(conv_dir: &Path, root: &Path, read: Option<&str>) -> Result<(), String> {
+    tidy(&channel_memory(conv_dir, root)?, read)
+}
+
+/// The notes in a memory folder (a channel's or the team's), newest first, without its index.
+pub fn notes_in(dir: &Path) -> Vec<Entry> {
+    let mut out: Vec<Entry> = fs::read_dir(dir)
+        .map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.is_file() && is_md(p) && p.file_name().is_some_and(|n| n != "MEMORY.md") && !is_marked(p))
+        .filter_map(|p| entry_of(dir, &p, Path::new(p.file_name()?)))
+        .collect();
+    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    out
+}
+
+/// Where what holds across the whole team is kept on this Mac: gathered by the dreaming job from
+/// the memories of the team's public channels, which every member already has. It is read, never
+/// synced, so each member's Cube keeps its own copy from the same sources.
+pub const TEAM_MEMORY: &str = ".team-memory";
+
+pub fn team_dir(root: &Path) -> Result<PathBuf, String> {
+    let dir = root.join(TEAM_MEMORY);
+    fs::create_dir_all(dir.join(".inbox")).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+#[derive(Serialize, Debug)]
+pub struct Notes {
+    dir: String,
+    notes: Vec<Entry>,
+}
+
+/// A channel's memory: its folder and its notes.
+#[tauri::command]
+pub async fn channel_memory_list(conv_dir: String) -> Result<Notes, String> {
+    let dir = channel_memory(Path::new(&conv_dir), &crate::root())?;
+    Ok(Notes { dir: dir.to_string_lossy().into_owned(), notes: notes_in(&dir) })
+}
+
+/// The team's memory on this Mac: its folder and its notes.
+#[tauri::command]
+pub async fn team_memory_list() -> Result<Notes, String> {
+    let dir = team_dir(&crate::root())?;
+    Ok(Notes { dir: dir.to_string_lossy().into_owned(), notes: notes_in(&dir) })
+}
+
+/// Puts what the team's public channels remember into the team memory's inbox. Returns the
+/// folder and the inbox file, relative to it.
+#[tauri::command]
+pub async fn team_memory_inbox(text: String) -> Result<(String, String), String> {
+    let dir = team_dir(&crate::root())?;
+    let rel = format!(".inbox/channels-{}.md", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
+    fs::write(dir.join(&rel), text).map_err(|e| e.to_string())?;
+    Ok((dir.to_string_lossy().into_owned(), rel))
+}
+
+#[tauri::command]
+pub async fn team_memory_tidy(read: Option<String>) -> Result<(), String> {
+    tidy(&team_dir(&crate::root())?, read.as_deref())
+}
+
+#[tauri::command]
+pub async fn channel_memory_inbox(conv_dir: String, text: String) -> Result<(String, String), String> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    channel_inbox(Path::new(&conv_dir), &crate::root(), &text, stamp)
+}
+
+#[tauri::command]
+pub async fn channel_memory_tidy(conv_dir: String, read: Option<String>) -> Result<(), String> {
+    channel_tidy(Path::new(&conv_dir), &crate::root(), read.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,15 +824,6 @@ mod tests {
     }
 
     #[test]
-    fn a_block_is_added_once_and_replaced_after() {
-        let first = with_block("My own rules.\n", "memory v1");
-        assert_eq!(first, format!("My own rules.\n\n{BLOCK_START}\nmemory v1\n{BLOCK_END}\n"));
-        let second = with_block(&format!("{first}\nMore of mine.\n"), "memory v2");
-        assert_eq!(second, format!("My own rules.\n\n{BLOCK_START}\nmemory v2\n{BLOCK_END}\n\nMore of mine.\n"));
-        assert_eq!(with_block("", "m"), format!("{BLOCK_START}\nm\n{BLOCK_END}\n"));
-    }
-
-    #[test]
     fn exports_memory_and_skills_without_touching_what_is_not_cubes() {
         let home = temp("export-home");
         let know = temp("export-know");
@@ -725,17 +850,30 @@ mod tests {
         // A folder with our name that we did not write is left alone.
         assert_eq!(fs::read_to_string(home.join(".claude/skills/cube-weekly-report/SKILL.md")).unwrap(), "someone else's with our name");
 
-        let agents = fs::read_to_string(home.join(".codex/AGENTS.md")).unwrap();
-        assert!(agents.starts_with("Codex rules of mine.\n\n<!-- cube:memory:start -->"));
+        // Codex gets the memory as a skill; AGENTS.md stays the person's own.
+        assert_eq!(fs::read_to_string(home.join(".codex/AGENTS.md")).unwrap(), "Codex rules of mine.\n");
+        assert!(fs::read_to_string(home.join(".codex/skills/cube-memory/SKILL.md")).unwrap().contains("Keep answers to a few lines."));
         assert!(home.join(".codex/skills/cube-weekly-report/ref/template.md").is_file());
         assert!(home.join(".codex/skills/cube-weekly-report/.cube-managed").is_file());
 
         assert!(fs::read_to_string(home.join(".hermes/skills/cube/cube-memory/SKILL.md")).unwrap().starts_with("---\nname: cube-memory\n"));
         assert!(home.join(".hermes/skills/cube/cube-weekly-report/SKILL.md").is_file());
 
-        // Exporting again replaces the block instead of adding a second one.
+        // Exporting again keeps the memory skill: it is Cube's own, not a stale export.
         export_from(&home, &know, &["codex".into()]).unwrap();
-        assert_eq!(fs::read_to_string(home.join(".codex/AGENTS.md")).unwrap().matches(BLOCK_START).count(), 1);
+        assert!(home.join(".codex/skills/cube-memory/SKILL.md").is_file());
+    }
+
+    #[test]
+    fn the_block_earlier_versions_put_in_agents_md_is_taken_out() {
+        let home = temp("retire-home");
+        put(&home.join(".codex/AGENTS.md"), &format!("Mine before.\n\n{BLOCK_START}\nold memory\n{BLOCK_END}\n\nMine after.\n"));
+        retire_codex_block(&home).unwrap();
+        assert_eq!(fs::read_to_string(home.join(".codex/AGENTS.md")).unwrap(), "Mine before.\n\nMine after.\n");
+        assert_eq!(without_block(&format!("{BLOCK_START}\nx\n{BLOCK_END}\n")).unwrap(), "");
+        assert!(without_block("nothing of ours").is_none());
+        // Nothing to do when there is no file.
+        retire_codex_block(&temp("retire-none")).unwrap();
     }
 
     #[test]
@@ -803,5 +941,40 @@ mod tests {
         let got = export_from(&home, &know, &["claude".into()]).unwrap();
         assert_eq!(got[0].memory, "No notes to export yet.");
         assert!(!home.join(".claude/rules/cube-memory.md").exists());
+    }
+
+    #[test]
+    fn lists_the_notes_of_a_memory_folder_newest_first_without_its_index() {
+        let dir = temp("notes");
+        put(&dir.join("MEMORY.md"), "- index");
+        put(&dir.join("old.md"), "---\nname: ship on fridays\ndescription: when releases go out\n---\nFridays.");
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        put(&dir.join("new.md"), "---\nname: uses pnpm\n---\npnpm.");
+        put(&dir.join("gone.md"), "DELETE");
+        let got: Vec<String> = notes_in(&dir).into_iter().map(|e| e.name).collect();
+        assert_eq!(got, ["uses pnpm", "ship on fridays"]);
+        let team = team_dir(&dir).unwrap();
+        assert!(team.ends_with(TEAM_MEMORY) && team.join(".inbox").is_dir());
+    }
+
+    #[test]
+    fn a_channel_keeps_its_memory_in_its_own_folder_and_tidies_after_a_run() {
+        let root = temp("channel-root");
+        let conv = root.join("general");
+        fs::create_dir_all(&conv).unwrap();
+        let (dir, rel) = channel_inbox(&conv, &root, "lines", 7).unwrap();
+        assert_eq!(Path::new(&dir), conv.canonicalize().unwrap().join(CHANNEL_MEMORY));
+        assert_eq!(rel, ".inbox/memory-7.md");
+        put(&Path::new(&dir).join("keep.md"), "a fact");
+        put(&Path::new(&dir).join("gone.md"), "DELETE\n");
+        channel_tidy(&conv, &root, Some(&rel)).unwrap();
+        assert!(Path::new(&dir).join("keep.md").is_file());
+        assert!(!Path::new(&dir).join("gone.md").exists());
+        assert!(!Path::new(&dir).join(&rel).exists());
+        // Only a conversation folder directly under CubeSpaces, and only its inbox.
+        assert!(channel_inbox(&root.join(".knowledge"), &root, "x", 1).is_err());
+        fs::create_dir_all(conv.join("deeper")).unwrap();
+        assert!(channel_inbox(&conv.join("deeper"), &root, "x", 1).is_err());
+        assert!(channel_tidy(&conv, &root, Some(".inbox/../keep.md")).is_err());
     }
 }

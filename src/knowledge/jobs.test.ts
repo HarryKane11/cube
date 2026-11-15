@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dueJob, finished, jobPrompt, summaryOf, transcript, type Clock, type Line } from "./jobs";
+import { DREAM_EVERY, DREAM_IDLE, dreamPrompt, dueJob, finished, jobPrompt, summaryOf, transcript, type Clock, type Line } from "./jobs";
 
 const line = (convId: string, who: string, text: string, ts: number): Line => ({ convId, where: convId === "general" ? "#general" : "Direct message with Builder", who, text, ts });
 const T = Date.UTC(2026, 10, 12, 9, 0, 0);
@@ -94,14 +94,26 @@ describe("dueJob", () => {
     expect(dueJob({ ...base, imported: true, last: { memory: T - 2 * MIN } })).toBe("memory");
   });
 
+  it("dreams once Cube has been idle a while, over memory that changed or channels that may have, at most twice a day", () => {
+    const idle = { ...base, newest: T - DREAM_IDLE - MIN, last: { memory: T - 20 * MIN } };
+    expect(dueJob({ ...idle, memoryChangedAt: T - 20 * MIN })).toBe("dream");
+    // Still talking.
+    expect(dueJob({ ...idle, newest: T - 10 * MIN, memoryChangedAt: T - 20 * MIN })).toBe("wiki");
+    // Dreamed lately.
+    expect(dueJob({ ...idle, memoryChangedAt: T - 20 * MIN, last: { ...idle.last, dream: T - HOUR, wiki: T - HOUR } })).toBeNull();
+    // Nothing of the person's changed, but teammates' Cubes may have changed a channel's.
+    expect(dueJob({ ...idle, channels: true, last: { ...idle.last, dream: T - DREAM_EVERY - MIN } })).toBe("dream");
+    expect(dueJob({ ...idle, last: { ...idle.last, dream: T - DREAM_EVERY - MIN } })).toBeNull();
+  });
+
   it("rewrites the wiki only after memory changed, and not more than every few hours", () => {
-    expect(dueJob({ ...base, last: { memory: T - 20 * MIN }, memoryChangedAt: T - 20 * MIN })).toBe("wiki");
-    expect(dueJob({ ...base, last: { memory: T - 20 * MIN, wiki: T - HOUR }, memoryChangedAt: T - 20 * MIN })).toBeNull();
+    expect(dueJob({ ...base, last: { memory: T - 20 * MIN, dream: T }, memoryChangedAt: T - 20 * MIN })).toBe("wiki");
+    expect(dueJob({ ...base, last: { memory: T - 20 * MIN, dream: T, wiki: T - HOUR }, memoryChangedAt: T - 20 * MIN })).toBeNull();
     // The person may have it rewritten more often, or less.
-    expect(dueJob({ ...base, wikiEvery: 1, last: { memory: T - 20 * MIN, wiki: T - 2 * HOUR }, memoryChangedAt: T - 20 * MIN })).toBe("wiki");
-    expect(dueJob({ ...base, wikiEvery: 24, last: { memory: T - 20 * MIN, wiki: T - 5 * HOUR }, memoryChangedAt: T - 20 * MIN })).toBeNull();
+    expect(dueJob({ ...base, wikiEvery: 1, last: { memory: T - 20 * MIN, dream: T, wiki: T - 2 * HOUR }, memoryChangedAt: T - 20 * MIN })).toBe("wiki");
+    expect(dueJob({ ...base, wikiEvery: 24, last: { memory: T - 20 * MIN, dream: T, wiki: T - 5 * HOUR }, memoryChangedAt: T - 20 * MIN })).toBeNull();
     // A memory run that changed nothing gives the wiki nothing to do.
-    expect(dueJob({ ...base, last: { memory: T - 20 * MIN, wiki: T - 5 * HOUR }, memoryChangedAt: T - 9 * HOUR })).toBeNull();
+    expect(dueJob({ ...base, last: { memory: T - 20 * MIN, dream: T, wiki: T - 5 * HOUR }, memoryChangedAt: T - 9 * HOUR })).toBeNull();
   });
 
   it("looks for skills once enough new work has piled up, at most twice a day", () => {
@@ -112,3 +124,30 @@ describe("dueJob", () => {
     expect(dueJob(base)).toBeNull();
   });
 });
+
+describe("dreamPrompt", () => {
+  const o = { dir: "/k", person: "Kane", today: "2026-11-15" };
+  it("goes over one memory only, and merges, dates and prunes it", () => {
+    const personal = dreamPrompt({ kind: "personal" }, o);
+    expect(personal).toContain("Only memory/ is yours this time");
+    expect(personal).toContain("Merge overlaps");
+    expect(personal).toContain("when the date has passed (today is 2026-11-15)");
+    expect(personal).toContain("Never keep a secret");
+    expect(personal).toContain("ADDED: n");
+    const channel = dreamPrompt({ kind: "channel", place: "#general", shared: true }, { ...o, dir: "/s/general/cube-memory" });
+    expect(channel).toContain("their Cubes write in it too");
+    expect(channel).toContain("nothing about anyone's private life");
+    expect(channel).not.toContain("memory/imported");
+  });
+
+  it("gathers the team's memory from the inbox alone, with where each fact came from", () => {
+    const team = dreamPrompt({ kind: "team" }, o);
+    expect(team).toContain("Every statement must come from the inbox");
+    expect(team).toContain("sources: #channel");
+    expect(team).toContain("A fact that only matters in one channel stays there");
+    // The steps run on in order after the team's own.
+    expect(team).toMatch(/\n6\. Separate the durable from the dated/);
+    expect(team).not.toMatch(/\n2\. Separate/);
+  });
+});
+

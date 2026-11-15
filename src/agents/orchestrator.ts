@@ -9,6 +9,7 @@ import { refreshUsage, takeLimits } from "./usageRun";
 import { loadEmojis } from "../lib/emoji";
 import { withoutFences } from "../lib/uiBlocks";
 import { knowledgeTick, listKnowledge, writeCubeMd, writeSubagentMd } from "../knowledge";
+import { CHANNEL_MEMORY, keepsOwnMemory, notesFor, othersRead } from "../knowledge/scope";
 import { fenced, removeFromConv, startTeam, taggedIn, unshareConv } from "../team";
 import { checkScopes, startSlack } from "../slack";
 import { customAdapter, parseManifest, type Manifest } from "./custom";
@@ -238,7 +239,7 @@ const ABOUT_CUBE = [
 /** Where a cube is told it is: a channel by its name, a chat by what it is about. */
 const placeOf = (conv: Conv): string => (conv.cube ? "a private conversation between them and their whole team of cubes" : conv.chat ? `a chat titled "${conv.name}"` : `the #${conv.name} channel`);
 
-function routerIntro(conv: Conv, person: string, guest?: string, called = false): string {
+function routerIntro(conv: Conv, person: string, guest?: string, called = false, outside = false): string {
   const team = conv.members
     .filter((id) => !isLeadRole(id))
     .map((id) => agentById(id))
@@ -271,7 +272,8 @@ function routerIntro(conv: Conv, person: string, guest?: string, called = false)
     ...(guest
       ? []
       : [`- You get to know ${person} as you go. When this message shows you something lasting about how they talk with you or how they like you to be (how formal, what they call you, what makes them laugh, what they find tiresome, something you two settled on), add one line of its own, \`SELF:\` and that one thing as a plain sentence. Cube keeps it without showing the line, and you are told it from then on; ${person} can see and remove what you kept. Rarely: only what will still be true next week, never something about this one message.`]),
-    ...(!guest && known.knowledgeDir && known.cubeMdAt ? [cubeMdRule(known.knowledgeDir, person)] : []),
+    ...(keepsOwnMemory(conv) ? memoryRules(conv, person, outside) : !guest && known.knowledgeDir && known.cubeMdAt ? [cubeMdRule(known.knowledgeDir, person)] : []),
+    ...teamRules(outside),
     `- Write in the language ${who} wrote in, and in that language only.`,
   ].join("\n");
 }
@@ -312,9 +314,9 @@ function workspaceRule(dir: string, person: string): string {
   return `- The current folder is ${person}'s own project folder, ${dir}, which they opened for you to work in. It holds their work, not only this conversation's. Work in it directly, as in any project: read what is there before you change it, follow what the project says about itself (CLAUDE.md, AGENTS.md, README), change only what the request needs, and do not delete or overwrite what you did not make unless asked. Cube keeps no copy of this folder. ${back} Say in your reply which files you changed. Keep long content in files, not in chat.`;
 }
 
-function intro(agent: AgentDef, conv: Conv, guest?: string, called = false): string {
+function intro(agent: AgentDef, conv: Conv, guest?: string, called = false, outside = false): string {
   const person = store().name || "the person";
-  if (agent.id === ROUTER && conv.kind === "channel") return routerIntro(conv, person, guest, called);
+  if (agent.id === ROUTER && conv.kind === "channel") return routerIntro(conv, person, guest, called, outside);
   if (agent.id === ORCH && conv.kind === "channel") return leadIntro(conv, person);
   // An agent somewhere else gets what it needs to answer and nothing about this computer.
   if (engineOf(agent) === "remote") {
@@ -334,7 +336,10 @@ function intro(agent: AgentDef, conv: Conv, guest?: string, called = false): str
     "- When the person corrects you or tells you how they want things done from now on, end your reply with one line that starts with `NOTE:` and states the lesson in one plain sentence. They review it, and if they keep it you will be reminded of it in every later conversation. Use it rarely: lasting preferences and facts only, never something that matters just for this task.",
   ];
   const known = store();
-  if (known.knowledgeDir && known.cubeMdAt) {
+  rules.push(...teamRules(outside));
+  if (keepsOwnMemory(conv)) {
+    rules.push(...memoryRules(conv, person, outside));
+  } else if (known.knowledgeDir && known.cubeMdAt) {
     rules.push(cubeMdRule(known.knowledgeDir, person));
   } else if (known.knowledgeDir && known.knowledgeCount > 0) {
     rules.push(`- What this workspace has learned about ${person} and their work is kept as files in ${known.knowledgeDir}: memory/MEMORY.md lists the notes, wiki/index.md the pages, and skills/<name>/SKILL.md holds procedures that worked. Before work that could depend on their preferences or on how something is done here, read what applies.`);
@@ -386,8 +391,34 @@ interface PromptOpts {
 const PICTURE_RULE = "- You have no image model of your own, but Cube draws pictures for you with one. When a picture is wanted (an illustration, a character, an icon, a photo-like image, a texture; not a chart, a diagram or a layout, which you make yourself as SVG or HTML), end your reply with one line: `IMAGE: file-name.png | description`. The description is all the image model gets, so make it complete and exact, on that one line: the subject, the style or medium, the composition and framing, the light and mood, the colors, and what to leave out. Bring your own eye to it. Cube saves the picture in this folder's pictures/ and shows it on the Stage, and in Slack posts it in the thread. In your reply say in a sentence what you are having drawn; do not write the file yourself. One picture per reply.";
 /** Marks, among what a session was told, that it knows how to ask for a picture. */
 const PICTURES_TOLD = "rule:pictures";
+/** Marks that a session knows where the team's memory is. */
+const TEAM_TOLD = "rule:team";
 /** Marks that a session knows where CUBE.md is. */
 const CUBEMD_TOLD = "rule:cubemd";
+/**
+ * What a cube is told about memory in a channel: the channel's own, kept in its folder. In a
+ * conversation other people read it is also told that the person's own is closed to it there, so
+ * it does not spend its turn trying (macOS refuses it anyway; see src-tauri/src/fence.rs).
+ */
+function memoryRules(conv: Conv, person: string, outside = false): string[] {
+  const shared = othersRead(conv) || outside;
+  return [
+    `- What this ${conv.person ? "conversation" : "channel"} has learned is kept in ${CHANNEL_MEMORY}/ in this folder: ${CHANNEL_MEMORY}/MEMORY.md lists the notes, one fact per file. ${shared ? "Everyone in it reads it, and their Cubes add to it." : "It goes with the channel to everyone in it if the channel is shared."} Before work that could depend on how things are done here, read what applies. Cube keeps it up from the conversation: do not write there yourself.`,
+    ...(shared ? [`- Other people read this conversation, so what ${person} keeps for themselves (their personal memory, their other conversations and folders, earlier sessions) is closed to you here, and the computer refuses any attempt to read it. Do not try, and do not guess at it.`] : []),
+  ];
+}
+
+/**
+ * What holds across the team, as Cube keeps it on this Mac from the team's public channels. Every
+ * member reads those channels, so any cube may be told of it; one answering someone outside the
+ * team (in Slack) is not, and cannot read it (see src-tauri/src/fence.rs).
+ */
+function teamRules(outside: boolean): string[] {
+  const team = store().teamMemory;
+  if (outside || !team?.count) return [];
+  return [`- What holds across the whole team, gathered from what its public channels remember, is in ${team.dir}: MEMORY.md lists the notes, each with the channels it came from. Read what applies before work that could depend on how the team does things. Cube keeps it: do not write there.`];
+}
+
 /** Where a cube starts from: the one file that says what this workspace has and points to the rest. */
 const cubeMdRule = (dir: string, person: string) => `- Start from ${dir}/CUBE.md, which Cube keeps current: who is here, the tools connected through the agent programs (MCP servers), the skills, the newest of what is remembered about ${person} and their work, the wiki, and ontology.md, which says how the people, projects, files and tools of this workspace are connected. Read CUBE.md before work that could depend on any of that, and follow its pointers (memory/MEMORY.md, wiki/index.md, skills/<name>/SKILL.md, ontology.md) for the detail.`;
 
@@ -416,7 +447,8 @@ function buildPrompt(agent: AgentDef, conv: Conv, trigger: Msg, hasSession: bool
   });
   const person = store().name || "the person";
   const parts: string[] = [];
-  if (!hasSession) parts.push(intro(agent, conv, guest, called));
+  // Someone in Slack may not be in the team: what holds across the team is not theirs to be told.
+  if (!hasSession) parts.push(intro(agent, conv, guest, called, Boolean(guest && trigger.slack)));
   if (notes.length) parts.push(notesBlock(store().name || "the person", notes));
   // A chat that began from a session of another program: a cube starting here is given what was said there. The Router,
   // which only decides who gets a request, is told what the chat is about and no more.
@@ -884,11 +916,13 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
   if (aside) opts.trust = "ask";
   // Asked by someone else: the cube reads and answers, and asks the person before anything more.
   if (how.guest && !isLeadRole(agentId)) opts.trust = "ask";
+  // Where other people read what a cube says, or someone else asked for it (a teammate, someone in Slack), macOS keeps it out of what the person keeps for themselves.
+  if ((othersRead(conv) || how.guest) && engine !== "remote") opts.fence = { dirs: [conv.dir], write: opts.trust !== "ask" && opts.trust !== "plan", team: !trigger.slack };
   const planning = !aside && !isLead && !isRouter && opts.trust === "plan";
   // A side answer, the Router and the Orchestrator never stop to ask: whatever needs an OK is simply not done.
   const quiet = aside || isLead || isRouter;
   // Approved notes go out once per session: all of them at its start, later ones as they are kept.
-  const kept = s.notes.filter((n) => n.agentId === agentId && n.state === "kept");
+  const kept = notesFor(s.notes.filter((n) => n.agentId === agentId && n.state === "kept"), conv, convById);
   const already = session ? (s.told[key] ?? []) : [];
   const told: PromptOpts = { wake: how.wake, guest: how.guest?.name, called: how.guest?.called, routed: auto && !isRouter, thread, copy: key.includes(":copy") };
   let prompt = buildPrompt(agent, conv, trigger, Boolean(session), kept.filter((n) => !already.includes(n.id)), told);
@@ -903,8 +937,11 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
   const canDraw = Boolean(s.available.codex) && !aside && !isLead && !isRouter && engine !== "remote";
   if (canDraw && session && !already.includes(PICTURES_TOLD)) prompt += `\n\nNew since this conversation began:\n${PICTURE_RULE}`;
   // A session that began before CUBE.md was written hears of it once. It is added at the end, so what the session already holds is not disturbed.
-  const hasCubeMd = Boolean(s.knowledgeDir && s.cubeMdAt) && !aside && !isRouter && engine !== "remote";
+  const hasCubeMd = Boolean(s.knowledgeDir && s.cubeMdAt) && !aside && !isRouter && engine !== "remote" && !keepsOwnMemory(conv);
   if (hasCubeMd && session && !already.includes(CUBEMD_TOLD)) prompt += `\n\nNew since this conversation began:\n${cubeMdRule(s.knowledgeDir, s.name || "the person")}`;
+  // The same once the team has a memory, for a session that began before it had one.
+  const team = !aside && engine !== "remote" ? teamRules(Boolean(how.guest && trigger.slack)) : [];
+  if (team.length && session && !already.includes(TEAM_TOLD)) prompt += `\n\nNew since this conversation began:\n${team.join("\n")}`;
   // A session that began before cubes chose their reactions, or before the workspace's emoji were as they are now, hears of it once.
   const reactTold = `rule:react:${Object.keys(s.emojis).length}`;
   const canReact = !aside && !isRouter && engine !== "remote";
@@ -920,7 +957,7 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
   if (aside) prompt += `\n\n${ASIDE_RULE}`;
   else if (planning && !CAN_PLAN[engine]) also(`\n\n${PLAN_RULE}`);
   if (fresh !== undefined) opts.freshPrompt = fresh;
-  if (!stateless) s.markTold(key, [...kept.map((n) => n.id), ...(canDraw ? [PICTURES_TOLD] : []), ...(hasCubeMd ? [CUBEMD_TOLD] : []), ...(canReact ? [reactTold] : [])]);
+  if (!stateless) s.markTold(key, [...kept.map((n) => n.id), ...(canDraw ? [PICTURES_TOLD] : []), ...(hasCubeMd ? [CUBEMD_TOLD] : []), ...(team.length ? [TEAM_TOLD] : []), ...(canReact ? [reactTold] : [])]);
   const startedAt = Date.now();
   s.addMsg({ id: msgId, convId: conv.id, author: agentId, text: "", ts: startedAt, parentId: rootId, streaming: true, engine, acts: how.guest ? [{ kind: "other", label: `Asked by ${how.guest.name}`, at: 0 }] : [], auto, aside: aside || undefined });
   // A side answer does not change what the cube is shown doing: its main work goes on.
@@ -1189,6 +1226,8 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
   const begin = (cwd: string) => {
     // Stopped while its copy was being set up.
     if (!active.has(runId)) return;
+    // A cube working in its own copy of the folder works there, and still reaches the shared folder's history.
+    if (opts.fence && !opts.fence.dirs.includes(cwd)) opts.fence = { ...opts.fence, dirs: [cwd, ...opts.fence.dirs] };
     if (engine === "api") {
       const built = startBuiltin({ prompt, sessionId: session, opts, dir: cwd, onEv, onDone: finish });
       run.stop = built.stop;
@@ -1225,7 +1264,7 @@ function dispatch(conv: Conv, agentId: string, trigger: Msg, hops: number, rootI
         if (!run.stoppedByPerson) parser.exit(code).forEach(onEv);
         finish();
       }
-    }, input).catch((e) => {
+    }, input, opts.fence).catch((e) => {
       onEv({ t: "error", message: String(e) });
       finish();
     });

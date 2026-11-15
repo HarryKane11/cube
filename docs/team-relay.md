@@ -13,7 +13,7 @@ This document is the contract between the Cube app and `cube-relay`.
   deletions of those messages, the member list, and the files put in a shared channel's folder,
   with every earlier version of them (see "Files").
 - Not shared: direct messages with agents, local-only channels and their folders, permission
-  requests, API keys, session ids.
+  requests, API keys, session ids, and the person's own memory (see "Memory").
 - By default a message only starts agents on its **author's** Mac, and a teammate's message runs
   nothing on yours. An agent's message carries the person it works for.
 - A person can open a channel they shared so that teammates can call their cubes there (see
@@ -52,7 +52,9 @@ here"). When it is on, for a message a teammate writes in that channel:
 - only messages written just now count. History caught up after a reconnect starts nothing;
 - the cube runs on the channel owner's Mac with **ask-first** permission, whatever the
   conversation's mode: it may read and reply, and every file change or command is put to the
-  owner for an OK. Rules the owner saved ("always allow…") do not apply to these runs;
+  owner for an OK. Rules the owner saved ("always allow…") do not apply to these runs. A cube on
+  Codex is not asked anything here (see "Memory"): it reads, runs commands inside its sandbox
+  with no network, and cannot change files;
 - at most eight such runs start in five minutes per channel.
 
 The same path serves Slack (docs/slack.md): there the person who wrote is someone in Slack, and
@@ -61,6 +63,93 @@ a mention of the Cube bot is always answered.
 Before publishing an agent's message the app masks what looks like a credential (API key
 prefixes, private key blocks, bearer tokens): agents read files people would not paste into a
 team channel.
+
+## Memory
+
+Cube keeps two kinds of memory, by where something was learned.
+
+- **The person's own.** What they say to their cubes on their own (a direct message with a cube,
+  a chat, the conversation with the whole team) goes to `~/CubeSpaces/.knowledge`: memory,
+  skills, the wiki, CUBE.md. It never leaves the Mac, and no cube sees it in a conversation other
+  people read.
+- **A channel's.** Every channel keeps a memory of its own from the moment it is started, in
+  `cube-memory/` inside its folder: one note per file and `MEMORY.md` as the index. It is learned
+  only from that channel's lines. When the channel is shared, the folder goes to everyone in it
+  and the memory with it: every member's Cube reads it and adds to it. Each Cube learns only from
+  its own side's lines (its person, their cubes, people in Slack they answer); a teammate's lines
+  are given to it as context, and the teammate's own Cube keeps what they said. The job's inbox
+  is `cube-memory/.inbox/`, which is hidden and so never synced.
+
+- **The team's.** What holds across the whole team, gathered from what the team's **public**
+  channels remember, in `~/CubeSpaces/.team-memory` on each member's Mac. Every member reads
+  those channels anyway, so nothing in it is anyone's secret. A private channel's memory, a
+  direct conversation with a teammate and anyone's personal memory never go into it. It is not
+  synced: each member's Cube gathers its own copy from the same sources. Every cube may read it,
+  but for one answering someone in Slack, who may not be in the team.
+
+Notes an agent proposed (`NOTE:`) and what the Router keeps about how the person talks with it
+(`SELF:`) follow the same line: a channel is told only those learned in it, and those the person
+wrote by hand for the role.
+
+### Kept up by itself
+
+Memory builds up without being asked. Until the person picks a program for background work,
+Cube picks one that is installed (Claude Code with a small model, else Codex with low effort;
+never Hermes, which cannot be fenced, nor the built-in agent, which spends the person's own key).
+
+- **Memory**, once a conversation has gone quiet: the person's own from their own
+  conversations, then each channel's from that channel's lines.
+- **Dreaming**, once Cube has been idle for 30 minutes and at most every 12 hours: a reflective
+  pass over each memory that changed since the last one. It merges notes that say the same thing,
+  keeps the later of two that disagree, retires what is dated and past, turns relative dates into
+  dates, drops what can be looked up, and rewrites the index. A shared channel's memory is
+  dreamed over by one member's Cube a day, the same one on every member's Mac (a hash of the
+  member's key, the channel and the date), so two Cubes do not rewrite the same notes at once.
+  Then the team's memory is gathered again if a public channel's memory changed.
+- **The wiki** and **skills**, from the person's own memory, as before.
+
+The relay keeps every version of a file, so a note dreaming removes from a channel's memory is
+gone from everyone's folder but not from the channel's history.
+
+### The fence
+
+In a conversation other people read (a shared channel, a direct conversation with a teammate),
+for any run someone else asked for (a teammate, someone in Slack), and for the memory and
+dreaming jobs of any channel and of the team, the app starts agents inside a fence that macOS
+enforces, whoever asked for the run. Inside it a run cannot read or write:
+
+- `~/CubeSpaces` except the conversation's own folder (and the cube's own copy of it): the
+  person's memory and every other conversation's folder;
+- every open workspace but the one the run works in;
+- Cube's app data (the message store);
+- what the agent programs keep of earlier sessions and their own memories
+  (`~/.claude/projects` except the folder's own, `~/.claude/history.jsonl`, `file-history`,
+  `paste-cache`, `~/.codex/sessions`, `archived_sessions`, `history.jsonl`, `memories`, its
+  databases, and `~/.hermes`);
+- the copies of Cube's memory and skills exported to the programs.
+
+The team's memory is let back in for reading only, except for a run answering someone in Slack.
+
+How it is enforced depends on the program (src-tauri/src/fence.rs):
+
+- Claude Code, the built-in agent's shell commands and programs of the person's own run under a
+  Seatbelt profile (`sandbox-exec`) built by the Rust side. Claude Code's own sandbox is turned off
+  for those runs, because macOS does not start one sandbox inside another.
+- Codex sandboxes its own commands, so it gets the same places as a permission profile of its
+  own. Every line Cube writes to such a Codex passes through the Rust side, which puts the profile
+  in, removes any sandbox or approval setting that would replace it, refuses any request Cube does
+  not send, and sets the approval policy to `never`, so Codex never asks to run a command outside
+  its sandbox. Its own memories are switched off for the run.
+- Hermes keeps every session and its memory in one database it has to read to work, so it cannot
+  be fenced. It does not run in a conversation other people read.
+
+The web side only names the folders a run works in, each of which must be a conversation folder
+or an open workspace; it cannot change what is walled off. When a channel is shared, its cubes'
+sessions start over, since what they were told before may hold the person's own memory.
+
+Two limits: what a teammate's Cube already received stays on their Mac, and the fence covers the
+places Cube knows to be the person's. Files of theirs elsewhere (`~/Documents`, say) are not walled
+off; the ask-first rule above is what guards them.
 
 ## Identity
 

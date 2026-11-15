@@ -15,11 +15,12 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod browser;
 mod drive;
+mod fence;
 mod knowledge;
 mod sessions;
 mod usage;
@@ -37,6 +38,41 @@ struct Runs(Mutex<HashMap<String, Arc<Mutex<Child>>>>);
 /// Open input pipes of the runs that take answers while they work, keyed by run id.
 #[derive(Default)]
 struct Inputs(Mutex<HashMap<String, ChildStdin>>);
+
+/// The permission profile of each fenced Codex run, by run id: every line written to it passes
+/// through `fence::codex_line` with this profile.
+#[derive(Default)]
+struct CodexFences(Mutex<HashMap<String, serde_json::Value>>);
+
+/// The folders a run in a conversation other people read works in (see fence.rs). The web side
+/// names them; each must be a place Cube may work in at all.
+#[derive(Deserialize)]
+struct FenceArg {
+    dirs: Vec<String>,
+    write: bool,
+    /// Whether the run may read what holds across the team. Not for a run answering someone outside it.
+    #[serde(default)]
+    team: bool,
+}
+
+impl FenceArg {
+    fn resolve(&self) -> Result<fence::Fence, String> {
+        if self.dirs.is_empty() {
+            return Err("A fenced run needs the folder it works in.".into());
+        }
+        let dirs = self.dirs.iter().map(|d| inside_root(Path::new(d))).collect::<Result<Vec<_>, _>>()?;
+        Ok(fence::Fence { dirs, write: self.write, team: self.team })
+    }
+}
+
+/// Puts a command inside the fence's Seatbelt profile.
+fn fenced(program: &str, args: &[String], f: &fence::Fence) -> Result<Command, String> {
+    let root = root().canonicalize().map_err(|e| e.to_string())?;
+    let profile = fence::seatbelt(&home(), &root, &workspace::roots(), f);
+    let mut cmd = Command::new("/usr/bin/sandbox-exec");
+    cmd.arg("-p").arg(profile).arg(program).args(args);
+    Ok(cmd)
+}
 
 #[derive(Clone, Serialize)]
 struct AgentEvent {
@@ -142,11 +178,41 @@ async fn agent_start(
     args: Vec<String>,
     cwd: String,
     input: Option<String>,
+    fence: Option<FenceArg>,
 ) -> Result<(), String> {
     let dir = inside_root(Path::new(&cwd))?;
-    let mut cmd = Command::new(&program);
-    cmd.args(&args)
-        .current_dir(&dir)
+    let fence = fence.map(|f| f.resolve()).transpose()?;
+    let name = fence::program_name(&program).to_string();
+    let mut input = input;
+    let mut cmd = match &fence {
+        None => {
+            let mut cmd = Command::new(&program);
+            cmd.args(&args);
+            cmd
+        }
+        Some(_) if name == "hermes" => return Err(fence::HERMES_REFUSED.into()),
+        Some(f) if name == "codex" => {
+            // Codex boxes its own commands, and a sandbox cannot be started inside another: it gets the fence as its own profile.
+            let root_dir = root().canonicalize().map_err(|e| e.to_string())?;
+            let profile = fence::codex_profile(&home(), &root_dir, &workspace::roots(), f);
+            if let Some(text) = &input {
+                input = Some(text.lines().map(|l| fence::codex_line(l, &profile)).collect::<Result<Vec<_>, _>>()?.join("\n") + "\n");
+            }
+            app.state::<CodexFences>().0.lock().unwrap().insert(run_id.clone(), profile);
+            let mut cmd = Command::new(&program);
+            cmd.args(&args);
+            cmd
+        }
+        Some(f) => {
+            let mut all = args.clone();
+            // Claude Code's own sandbox would have to start inside this one, which macOS does not allow.
+            if name == "claude" {
+                all.extend(["--settings".to_string(), r#"{"sandbox":{"enabled":false}}"#.to_string()]);
+            }
+            fenced(&program, &all, f)?
+        }
+    };
+    cmd.current_dir(&dir)
         .env("PATH", shell_path())
         // With `input`, the run reads its request from stdin and the pipe stays open for answers
         // (see agent_write) until agent_end_input closes it.
@@ -186,6 +252,7 @@ async fn agent_start(
         };
         app.state::<Runs>().0.lock().unwrap().remove(&run_id);
         app.state::<Inputs>().0.lock().unwrap().remove(&run_id);
+        app.state::<CodexFences>().0.lock().unwrap().remove(&run_id);
         let _ = app.emit(
             "agent-event",
             AgentEvent { run_id, stream: "exit".into(), line: String::new(), code },
@@ -210,7 +277,12 @@ async fn agent_stop(runs: State<'_, Runs>, run_id: String) -> Result<(), String>
 
 /// Sends one line to a running agent, for example the answer to a permission request.
 #[tauri::command]
-async fn agent_write(inputs: State<'_, Inputs>, run_id: String, line: String) -> Result<(), String> {
+async fn agent_write(inputs: State<'_, Inputs>, fences: State<'_, CodexFences>, run_id: String, line: String) -> Result<(), String> {
+    let profile = fences.0.lock().unwrap().get(&run_id).cloned();
+    let line = match profile {
+        Some(p) => fence::codex_line(&line, &p)?,
+        None => line,
+    };
     let mut map = inputs.0.lock().unwrap();
     let pipe = map.get_mut(&run_id).ok_or("That agent is no longer running.")?;
     pipe.write_all(line.as_bytes())
@@ -1090,11 +1162,18 @@ struct CommandOutput {
 /// Runs one shell command in a conversation folder for the built-in agent and waits for it,
 /// up to `timeout` seconds.
 #[tauri::command]
-async fn run_command(dir: String, command: String, timeout: Option<u64>) -> Result<CommandOutput, String> {
+async fn run_command(dir: String, command: String, timeout: Option<u64>, fence: Option<FenceArg>) -> Result<CommandOutput, String> {
     let base = inside_root(Path::new(&dir))?;
-    let mut cmd = Command::new("/bin/zsh");
-    cmd.args(["-lc", &format!("{{ {command}\n}} 2>&1")])
-        .current_dir(&base)
+    let shell_args = ["-lc".to_string(), format!("{{ {command}\n}} 2>&1")];
+    let mut cmd = match fence.map(|f| f.resolve()).transpose()? {
+        Some(f) => fenced("/bin/zsh", &shell_args, &f)?,
+        None => {
+            let mut cmd = Command::new("/bin/zsh");
+            cmd.args(&shell_args);
+            cmd
+        }
+    };
+    cmd.current_dir(&base)
         .env("PATH", shell_path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1157,6 +1236,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Runs::default())
         .manage(Inputs::default())
+        .manage(CodexFences::default())
         .manage(Terms::default())
         .manage(browser::Browser::default())
         .manage(remote::Remote::default())
@@ -1167,6 +1247,10 @@ pub fn run() {
         .setup(|app| {
             // Files in the workspaces opened before can be shown in the app again.
             workspace::restore(app.handle());
+            // Earlier versions put Cube's memory into ~/.codex/AGENTS.md, which every Codex session reads, shared ones too.
+            if let Err(e) = knowledge::retire_codex_block(&home()) {
+                eprintln!("Could not take Cube's memory out of ~/.codex/AGENTS.md: {e}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1222,6 +1306,12 @@ pub fn run() {
             knowledge::knowledge_import,
             knowledge::knowledge_export,
             knowledge::knowledge_remove,
+            knowledge::channel_memory_inbox,
+            knowledge::channel_memory_tidy,
+            knowledge::channel_memory_list,
+            knowledge::team_memory_list,
+            knowledge::team_memory_inbox,
+            knowledge::team_memory_tidy,
             slack::slack_set,
             slack::slack_configured,
             slack::slack_clear,
