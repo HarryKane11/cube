@@ -57,7 +57,8 @@ export function startBuiltin({ prompt, sessionId, opts, dir, onEv, onDone }: Sta
     const ctx = {
       dir,
       trust: opts.trust ?? "edits",
-      io,
+      // Its shell commands are kept out of what the person keeps for themselves, the same as a program's would be.
+      io: opts.fence ? { ...io, run: (d: string, command: string) => runCommand(d, command, undefined, opts.fence) } : io,
       onEv,
       ask: (tool: string, input: unknown) =>
         new Promise<boolean>((resolve) => {

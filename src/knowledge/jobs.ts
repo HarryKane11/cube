@@ -5,11 +5,12 @@
  * to hand a job, what to tell it, and when one is due.
  */
 
-export type JobKind = "memory" | "skills" | "wiki";
-export const JOBS: JobKind[] = ["memory", "skills", "wiki"];
+export type JobKind = "memory" | "dream" | "skills" | "wiki";
+export const JOBS: JobKind[] = ["memory", "dream", "skills", "wiki"];
 
 export const JOB_ABOUT: Record<JobKind, { name: string; about: string }> = {
   memory: { name: "Memory", about: "Reads new conversations and keeps what is worth remembering" },
+  dream: { name: "Dreaming", about: "While Cube is idle: merges, updates and prunes what is remembered, and gathers what holds across the team" },
   skills: { name: "Skills", about: "Turns ways of working that proved themselves into skills, improves and tidies them" },
   wiki: { name: "Wiki", about: "Arranges what is remembered, and what each agent program can do, into pages you can read" },
 };
@@ -32,6 +33,8 @@ export interface Line {
   who: string;
   text: string;
   ts: number;
+  /** False for a teammate's line in a channel: it is there to read the rest by, and their own Cube learns from it. */
+  mine?: boolean;
 }
 
 /** The most text of new conversation handed to one run. Older lines wait for the next. */
@@ -56,7 +59,7 @@ export function transcript(lines: Line[], limit = TRANSCRIPT_LIMIT): { text: str
   const groups = new Map<string, Line[]>();
   for (const l of taken) groups.set(l.convId, [...(groups.get(l.convId) ?? []), l]);
   const day = (ts: number) => new Date(ts).toISOString().slice(0, 10);
-  const parts = [...groups.values()].map((g) => `## ${g[0].where} (${day(g[0].ts)}${day(g[g.length - 1].ts) !== day(g[0].ts) ? ` to ${day(g[g.length - 1].ts)}` : ""})\n\n${g.map((l) => `**${l.who}:** ${l.text.trim()}`).join("\n\n")}`);
+  const parts = [...groups.values()].map((g) => `## ${g[0].where} (${day(g[0].ts)}${day(g[g.length - 1].ts) !== day(g[0].ts) ? ` to ${day(g[g.length - 1].ts)}` : ""})\n\n${g.map((l) => `**${l.who}${l.mine === false ? " (teammate; context only)" : ""}:** ${l.text.trim()}`).join("\n\n")}`);
   return { text: `# Conversations in Cube\n\n${parts.join("\n\n")}\n`, upTo: taken[taken.length - 1].ts, count: taken.length };
 }
 
@@ -158,6 +161,44 @@ One short paragraph on what this file is and how to read it.
 8. Last, before the three count lines: when memory and the wiki show something worth doing next for ${o.person} (a follow-up that was promised, a date that is near, something left open, a chore that comes round often enough to schedule, a connected tool that would save them work), write at most three lines that start with \`SUGGEST:\`, each one request ${o.person} could send to the team exactly as written, in one sentence. Suggest nothing that is already done or already scheduled, and nothing you would have to guess at. No such line is a fine outcome.`;
 }
 
+/**
+ * What the memory job is told for one channel. It works in the channel's memory folder, which
+ * goes with the channel to everyone in it: so it keeps only what was learned in that channel,
+ * and only from what this person's side said there. A teammate's Cube does the same for theirs.
+ */
+export function channelJobPrompt(o: { dir: string; place: string; person: string; today: string; shared: boolean; language?: string }): string {
+  const language = o.language ?? "the language the people use in the material";
+  return `You keep the memory of one conversation in Cube, ${o.place}, where people work with teams of AI agents. You are in its memory folder, ${o.dir}. Work only inside this folder: read, create and change files there and nothing else. Use your file tools; if a shell is the only way you have to read and write files, use it for that alone. Do not run programs, install anything, use the network, or touch anything outside the folder. Today is ${o.today}.
+
+This memory belongs to the conversation, not to any one person. ${o.shared ? "Everyone in the conversation has this folder, and their Cubes read and add to it too." : "When the conversation is shared, this folder goes to everyone in it."} So:
+- Keep only what was said in this conversation and matters to the work here: decisions and their reasons, how things are done here, who does what, names of systems and where things are. Nothing about anyone's private life, and nothing you know from anywhere but the material in front of you.
+- Learn from the lines of ${o.person} and their cubes. Lines marked "teammate; context only" are there so the rest can be understood: each teammate's own Cube keeps what they said.
+- Notes written by other members' Cubes are here too. Improve one when the material shows it wrong or out of date; leave alone what nothing in front of you contradicts.
+
+The folder:
+- *.md: one durable fact per file. MEMORY.md is the index, one line per note: \`- [name](file.md): one-line hook\`.
+- .inbox/: new material for this run.
+
+Your job now:
+1. Read every file in .inbox/ and the notes already here.
+2. Keep what will matter in later work here, one fact per file, named in short-kebab-case.md, in this form:
+
+---
+name: short-kebab-case
+description: one line that tells a reader whether this note matters to what they are doing
+type: project | feedback | reference
+updated: ${o.today}
+---
+
+The fact. For feedback and project notes add a **Why:** line and a **How to apply:** line.
+
+3. Keep only what is durable and would change how an agent works here. Not the state of a task, not what a file already records, not a summary of finished work. Turn "next week" into a date.
+4. Prefer changing an existing note to adding a near-copy. To remove a note, overwrite it with the single word DELETE.
+5. Rewrite MEMORY.md so it lists every note here.
+
+Write in ${language}; file names stay in English. Never keep a secret: no keys, passwords or tokens. When you are done, end with exactly three lines, \`ADDED: n\`, \`UPDATED: n\`, \`REMOVED: n\`, then one sentence on what changed. If nothing was worth keeping, say so; that is a fine outcome.`;
+}
+
 /** True when a job ended the way it was told to, with its three count lines. Without them it did not do the work. */
 export const finished = (text: string) => /^\s*ADDED:\s*\d+/mi.test(text) && /^\s*UPDATED:\s*\d+/mi.test(text) && /^\s*REMOVED:\s*\d+/mi.test(text);
 
@@ -185,6 +226,8 @@ export interface Clock {
   memoryChangedAt: number;
   /** The fewest hours between two wiki runs, as the person set it. Three when they set nothing. */
   wikiEvery?: number;
+  /** Whether any channel keeps a memory of its own: dreaming then looks in on them now and then, since teammates' Cubes change them too. */
+  channels?: boolean;
 }
 
 const MIN = 60_000;
@@ -192,6 +235,9 @@ const HOUR = 60 * MIN;
 /** How often the wiki is rewritten at most, in hours, unless the person chose otherwise; and what they can choose. */
 export const WIKI_EVERY = 3;
 export const WIKI_CHOICES = [1, 3, 6, 12, 24];
+/** Dreaming waits for Cube to have been idle this long, and runs at most this often. */
+export const DREAM_IDLE = 30 * MIN;
+export const DREAM_EVERY = 12 * HOUR;
 
 /**
  * Which job should run now when Cube keeps things up by itself, or null. Memory goes first, once
@@ -204,10 +250,92 @@ export function dueJob(c: Clock): JobKind | null {
   const memoryDue = c.imported || (quiet && (c.unread.memory >= 12 || (c.unread.memory > 0 && since("memory") > 6 * HOUR)));
   // Imports are worked in batch after batch; conversation waits at least ten minutes between runs.
   if (memoryDue && since("memory") > (c.imported ? MIN : 10 * MIN)) return "memory";
+  // Dreaming tidies what memory kept while nobody is working, before the wiki is arranged from it.
+  if (c.now - c.newest > DREAM_IDLE && since("dream") > DREAM_EVERY && (c.memoryChangedAt > (c.last.dream ?? 0) || c.channels)) return "dream";
   if (c.memoryChangedAt > (c.last.wiki ?? 0) && since("wiki") > (c.wikiEvery || WIKI_EVERY) * HOUR) return "wiki";
   if (quiet && c.unread.skills >= 40 && since("skills") > 12 * HOUR) return "skills";
   return null;
 }
+
+/** Where a dreaming run works: the person's own memory, one channel's, or the team's. */
+export type DreamScope = { kind: "personal" } | { kind: "channel"; place: string; shared: boolean } | { kind: "team" };
+
+const DREAM_STEPS = (today: string, index: string, notes: string) => `1. Take stock: read ${index} and every note in ${notes}. Note which ones overlap, which look stale and which are thin.
+2. Separate the durable from the dated. Preferences, ways of working, who does what, decisions and their reasons, and recurring work are durable: keep them and sharpen them. Specific tasks, deadlines and one-off work are dated: when the date has passed (today is ${today}) or the work is done, remove the note, or fold what lasts from it into a durable one.
+3. Merge overlaps. Where two notes say the same thing about the same person, project or preference, make them one, keep the richer file's name, and remove the other.
+4. Where two notes disagree, keep the one with the later \`updated\` date and say in it what changed; when you cannot tell which is right, keep both and say that they disagree.
+5. Fix time references: "next week", "this quarter", "by Friday" become dates.
+6. Drop what does not need remembering: what a file, the code or a connected tool records and can be looked up, and anything that would not change how an agent works.
+7. Set \`updated: ${today}\` on every note you change. Never touch a note's facts without a reason from the steps above.
+8. Rewrite ${index} so it lists every note that is left, one line each, under about 150 characters: \`- [name](file.md): one-line hook\`. Keep it under 200 lines.`;
+
+/**
+ * What a dreaming run is told: a reflective pass over one memory, the way a person goes over what
+ * they learned in a day. It merges, updates and prunes; for the team it gathers, from what the
+ * team's public channels remember, what holds across the team.
+ */
+export function dreamPrompt(scope: DreamScope, o: { dir: string; person: string; today: string; language?: string }): string {
+  const language = o.language ?? "the language the notes are written in";
+  const rules = `Work only inside this folder, ${o.dir}: read, create and change files there and nothing else. Use your file tools; if a shell is the only way you have to read and write files, use it for that alone. Do not run programs, install anything, use the network, or touch anything outside the folder. Today is ${o.today}. Write in ${language}; file names stay in English, in short-kebab-case. Never keep a secret: no keys, passwords or tokens. To remove a note, overwrite it with the single word DELETE; Cube removes it afterwards.`;
+  const end = "When you are done, end with exactly three lines, `ADDED: n`, `UPDATED: n`, `REMOVED: n`, then one sentence on what changed. If everything was already in order, say so; that is a fine outcome.";
+  if (scope.kind === "personal") {
+    return `You are dreaming over the memory of a workspace called Cube, where ${o.person} works with a team of AI agents: a reflective pass over what was learned about them and their work, so that a later conversation can find its way quickly without asking again. ${rules}
+
+Only memory/ is yours this time. Leave memory/imported/, skills/, wiki/, ontology.md, CUBE.md and inbox/ as they are.
+
+${DREAM_STEPS(o.today, "memory/MEMORY.md", "memory/ (not memory/imported/)")}
+
+Keep each note's front matter (\`name\`, \`description\`, \`type\`, \`source\`, \`updated\`) as top-level keys, one per line as they are now (\`type: project\`, never nested under another key), and keep its **Why:** and **How to apply:** lines.
+
+${end}`;
+  }
+  if (scope.kind === "channel") {
+    return `You are dreaming over the memory of one conversation in Cube, ${scope.place}: a reflective pass over what was learned there, so that a later conversation in it can find its way quickly. ${rules}
+
+This memory belongs to the conversation, not to any one person. ${scope.shared ? "Everyone in it has this folder, and their Cubes write in it too: so merge what they wrote with what is already here rather than dropping it, and remove a note only for one of the reasons below." : "When the conversation is shared, this folder goes to everyone in it."} Keep only what concerns the work in this conversation, nothing about anyone's private life.
+
+${DREAM_STEPS(o.today, "MEMORY.md", "this folder")}
+
+Keep each note's front matter (\`name\`, \`description\`, \`type\`, \`updated\`) as top-level keys, one per line as they are now (\`type: project\`, never nested under another key). Leave .inbox/ alone.
+
+${end}`;
+  }
+  return `You keep the team's memory in Cube: what holds across the whole team, gathered from what its public channels remember. Every member of the team reads those channels, so nothing here is anyone's secret; but keep it to what concerns the team's work. ${rules}
+
+The folder:
+- *.md: one fact per file that holds across the team (how the team works, who does what, the systems it uses, decisions that apply beyond one channel), with MEMORY.md as the index.
+- .inbox/: the notes each public channel keeps now, under the channel's name. Source material: never edit it.
+
+Your job now:
+1. Read the inbox and the notes already here.
+2. Keep a team note for what holds across the team: something several channels say, or one channel says about the whole team. A fact that only matters in one channel stays there: do not copy it here.
+3. Each note in this form:
+
+---
+name: short-kebab-case
+description: one line that tells a reader whether this note matters to what they are doing
+type: project | feedback | reference
+sources: #channel, #other-channel
+updated: ${o.today}
+---
+
+The fact, said once, in plain words.
+
+4. Every statement must come from the inbox. Do not guess or fill gaps. Where channels disagree, say so in the note.
+5. Remove a team note when no channel in the inbox supports it any more.
+${teamSteps(o.today)}
+
+${end}`;
+}
+
+/** The dreaming steps after the first (taking stock, which the team job does in its own words), numbered on from 6. */
+const teamSteps = (today: string) =>
+  DREAM_STEPS(today, "MEMORY.md", "this folder")
+    .split("\n")
+    .filter((l) => /^\d+\./.test(l))
+    .slice(1)
+    .map((l) => l.replace(/^(\d+)\./, (_, n) => `${Number(n) + 4}.`))
+    .join("\n");
 
 /** What the wiki job offered as things to do next: its \`SUGGEST:\` lines, three at most, each a request that can be sent as it is. */
 export function suggestionsOf(text: string): string[] {

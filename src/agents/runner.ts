@@ -1,7 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { DiskFile } from "../state/store";
-import type { AgentKind } from "./types";
+import type { AgentKind, Fence } from "./types";
 
 /** False when the page is opened in a plain browser, where there is no backend. */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -34,11 +34,11 @@ function ensureListener(): Promise<unknown> {
  * Starts an agent program. With `input`, that text is written to its stdin and the pipe stays
  * open so answers can follow (`writeProcess`) until `endInput` closes it.
  */
-export async function startProcess(runId: string, program: string, args: string[], cwd: string, handler: Handler, input?: string): Promise<void> {
+export async function startProcess(runId: string, program: string, args: string[], cwd: string, handler: Handler, input?: string, fence?: Fence): Promise<void> {
   await ensureListener();
   handlers.set(runId, handler);
   try {
-    await invoke("agent_start", { runId, program, args, cwd, input: input ?? null });
+    await invoke("agent_start", { runId, program, args, cwd, input: input ?? null, fence: fence ?? null });
   } catch (e) {
     handlers.delete(runId);
     throw e;
@@ -121,7 +121,7 @@ export const keyGet = (provider: string) => invoke<string>("key_get", { provider
 export const keyDelete = (provider: string) => invoke<void>("key_delete", { provider });
 /** The providers a key is saved for. */
 export const keyList = () => (inTauri ? invoke<string[]>("key_list") : Promise.resolve([] as string[]));
-export const runCommand = (dir: string, command: string, timeout?: number) => invoke<{ output: string; code: number | null }>("run_command", { dir, command, timeout });
+export const runCommand = (dir: string, command: string, timeout?: number, fence?: Fence) => invoke<{ output: string; code: number | null }>("run_command", { dir, command, timeout, fence: fence ?? null });
 
 /** The agent descriptions in ~/CubeSpaces/.agents, as [file name, content]. */
 export const customAgents = () => (inTauri ? invoke<[string, string][]>("custom_agents") : Promise.resolve([] as [string, string][]));
@@ -177,6 +177,19 @@ export const knowledgeList = () => invoke<KnowledgeListing>("knowledge_list");
 /** Copies in what Claude Code, Codex and Hermes remember. Changes nothing in their folders. */
 export const knowledgeImport = () => invoke<{ source: string; notes: number }[]>("knowledge_import");
 /** Writes Cube's memory and skills where each program reads them. */
+/** Puts new conversation into a channel's memory inbox. Returns the channel's memory folder and the inbox file, relative to it. */
+export const channelMemoryInbox = (convDir: string, text: string) => invoke<[string, string]>("channel_memory_inbox", { convDir, text });
+/** After a channel's memory job: takes away the inbox it read and the notes it marked DELETE. */
+export const channelMemoryTidy = (convDir: string, read?: string) => invoke<void>("channel_memory_tidy", { convDir, read: read ?? null });
+/** A memory folder (a channel's or the team's) and its notes, newest first. */
+export interface MemoryNotes {
+  dir: string;
+  notes: KnowledgeEntry[];
+}
+export const channelMemoryList = (convDir: string) => invoke<MemoryNotes>("channel_memory_list", { convDir });
+export const teamMemoryList = () => invoke<MemoryNotes>("team_memory_list");
+export const teamMemoryInbox = (text: string) => invoke<[string, string]>("team_memory_inbox", { text });
+export const teamMemoryTidy = (read?: string) => invoke<void>("team_memory_tidy", { read: read ?? null });
 export const knowledgeExport = (targets: string[]) => invoke<{ target: string; memory: string; skills: number }[]>("knowledge_export", { targets });
 export const knowledgeRemove = (rels: string[]) => invoke<void>("knowledge_remove", { rels });
 

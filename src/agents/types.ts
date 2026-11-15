@@ -123,6 +123,19 @@ export interface RunOpts {
    * program starts a new one: the whole of what a cube starting afresh is told.
    */
   freshPrompt?: string;
+  /**
+   * Set for a run in a conversation other people read: the folders it works in, and whether it
+   * may change them. The run is then kept by macOS out of everything the person keeps for
+   * themselves (see src-tauri/src/fence.rs).
+   */
+  fence?: Fence;
+}
+
+export interface Fence {
+  dirs: string[];
+  write: boolean;
+  /** Whether the run may read what holds across the team. Not for one answering someone outside it. */
+  team?: boolean;
 }
 
 export interface Parser {
