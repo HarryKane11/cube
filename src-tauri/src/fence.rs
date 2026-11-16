@@ -139,7 +139,7 @@ pub fn codex_profile(home: &Path, root: &Path, workspaces: &[PathBuf], fence: &F
 }
 
 /// The requests Cube sends Codex. A fenced Codex is sent nothing else.
-const CODEX_METHODS: &[&str] = &["initialize", "initialized", "thread/start", "thread/resume", "turn/start", "account/rateLimits/read"];
+const CODEX_METHODS: &[&str] = &["initialize", "initialized", "thread/start", "thread/resume", "turn/start", "thread/archive", "thread/unarchive", "account/rateLimits/read"];
 
 /// A key that could put a sandbox, an approval policy or a permission profile of its own in
 /// place of the fence.
@@ -311,6 +311,10 @@ mod tests {
         // Answers to what Codex asked pass as they are.
         let answer = r#"{"id":"7","result":{"decision":"decline"}}"#;
         assert_eq!(codex_line(answer, &profile).unwrap(), answer);
+        // Putting the thread away when the turn is over, and taking it out again, touch nothing else.
+        let archive = r#"{"id":10,"method":"thread/archive","params":{"threadId":"t"}}"#;
+        assert_eq!(codex_line(archive, &profile).unwrap(), archive);
+        assert!(codex_line(r#"{"id":8,"method":"thread/unarchive","params":{"threadId":"t"}}"#, &profile).is_ok());
         // Anything else Cube never sends is refused.
         assert!(codex_line(r#"{"id":4,"method":"command/exec","params":{"command":["cat","/x"]}}"#, &profile).is_err());
         assert!(codex_line("not json", &profile).is_err());
