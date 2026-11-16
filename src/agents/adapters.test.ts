@@ -43,10 +43,36 @@ describe("codex adapter", () => {
     expect(start("edits")).toEqual({ approvalPolicy: "untrusted", sandbox: "workspace-write", model: null });
   });
 
-  it("resumes a session, and starts a new thread when the old one is gone", () => {
+  it("takes a session out of the archive, resumes it, and starts a new thread when the old one is gone", () => {
     const p = ADAPTERS.codex.command("hi", "old", { trust: "free" }).parser!;
-    expect(sends(p.stdout('{"id":1,"result":{}}'))[1]).toEqual({ id: 2, method: "thread/resume", params: { threadId: "old", approvalPolicy: "never", sandbox: "danger-full-access", model: null } });
+    expect(sends(p.stdout('{"id":1,"result":{}}'))[1]).toEqual({ id: 8, method: "thread/unarchive", params: { threadId: "old" } });
+    // Refused when it was never archived: the resume goes ahead all the same.
+    expect(sends(p.stdout('{"id":8,"error":{"code":-32600,"message":"no archived rollout found for thread id old"}}'))).toEqual([
+      { id: 2, method: "thread/resume", params: { threadId: "old", approvalPolicy: "never", sandbox: "danger-full-access", model: null } },
+    ]);
     expect(sends(p.stdout('{"id":2,"error":{"code":-32600,"message":"no such thread"}}'))[0].method).toBe("thread/start");
+  });
+
+  it("archives the thread once the turn is over, and ends only when that is done", () => {
+    const p = ADAPTERS.codex.command("hi").parser!;
+    p.stdout('{"id":1,"result":{}}');
+    p.stdout('{"id":2,"result":{"thread":{"id":"t-1"}}}');
+    const done = p.stdout('{"method":"turn/completed","params":{"turn":{"id":"u1","status":"completed","error":null}}}');
+    expect(done).toEqual([{ t: "send", line: JSON.stringify({ id: 10, method: "thread/archive", params: { threadId: "t-1" } }) }]);
+    expect(p.stdout('{"id":10,"result":{}}')).toEqual([{ t: "end" }]);
+    expect(p.exit(0)).toEqual([]);
+  });
+
+  it("archives a thread whose turn was refused, and does not call a quit during the archive a failure", () => {
+    const p = ADAPTERS.codex.command("hi").parser!;
+    p.stdout('{"id":1,"result":{}}');
+    p.stdout('{"id":2,"result":{"thread":{"id":"t-1"}}}');
+    expect(sends(p.stdout('{"id":3,"error":{"message":"bad input"}}'))).toEqual([{ id: 10, method: "thread/archive", params: { threadId: "t-1" } }]);
+    const q = ADAPTERS.codex.command("hi").parser!;
+    q.stdout('{"id":1,"result":{}}');
+    q.stdout('{"id":2,"result":{"thread":{"id":"t-2"}}}');
+    q.stdout('{"method":"turn/completed","params":{"turn":{"id":"u1","status":"completed","error":null}}}');
+    expect(q.exit(0)).toEqual([{ t: "end" }]);
   });
 
   it("streams text, names what it does and ends with the turn", () => {

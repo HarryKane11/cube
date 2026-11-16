@@ -44,6 +44,10 @@ function innerCommand(cmd: unknown): string {
  * `codex app-server`: JSON-RPC over stdin and stdout, one message per line. Cube opens a thread
  * (or resumes one), starts a turn with the request, and reads what happens as notifications.
  * When Codex needs the person's OK it sends a request of its own and waits for the answer.
+ *
+ * Once the turn is over the thread is archived, so the conversations Cube holds with Codex do not
+ * fill the list in the Codex app. Codex will not resume an archived thread, so a thread is taken
+ * out of the archive just before it is resumed.
  */
 function codexParser(prompt: string, sessionId: string | undefined, opts: RunOpts | undefined): Parser {
   const trust = CODEX_TRUST[opts?.trust ?? "edits"];
@@ -53,14 +57,25 @@ function codexParser(prompt: string, sessionId: string | undefined, opts: RunOpt
   let ended = false;
   let warning = "";
   let usage: { in?: number; out?: number } | undefined;
+  let threadId: string | undefined;
+  // The turn is over and Cube is waiting for Codex to say the thread is archived.
+  let closing = false;
   // What each open request was about, so the answer can be put in the form that request wants.
   const asked = new Map<string, { id: unknown; kind: "command" | "files" | "questions"; questions?: any[] }>();
   const changed = new Map<string, string[]>();
   const startThread = (): Ev => rpc(2, "thread/start", { ...trust, model: opts?.model ?? null });
+  const resumeThread = (): Ev => rpc(2, "thread/resume", { threadId: sessionId, ...trust, model: opts?.model ?? null });
   const end = (): Ev[] => {
     if (ended) return [];
     ended = true;
     return [...(usage ? [{ t: "usage" as const, ...usage }] : []), { t: "end" }];
+  };
+  // Ending closes Codex's input and it quits, so the run ends only once the archive is done.
+  const close = (): Ev[] => {
+    if (ended || closing) return [];
+    if (!threadId) return end();
+    closing = true;
+    return [rpc(ARCHIVE_ID, "thread/archive", { threadId })];
   };
   return {
     stdout(line) {
@@ -71,8 +86,14 @@ function codexParser(prompt: string, sessionId: string | undefined, opts: RunOpt
       const it = p.item;
       if (o.id === 1 && o.result) {
         out.push({ t: "send", line: JSON.stringify({ method: "initialized" }) });
-        out.push(sessionId ? rpc(2, "thread/resume", { threadId: sessionId, ...trust, model: opts?.model ?? null }) : startThread());
+        out.push(sessionId ? rpc(UNARCHIVE_ID, "thread/unarchive", { threadId: sessionId }) : startThread());
+      } else if (o.id === UNARCHIVE_ID && !o.method) {
+        // Refused when the thread was never archived (a run that was stopped) or is gone; resuming sorts out which.
+        out.push(resumeThread());
+      } else if (o.id === ARCHIVE_ID && !o.method) {
+        out.push(...end());
       } else if (o.id === 2 && o.result?.thread?.id) {
+        threadId = o.result.thread.id;
         out.push({ t: "session", id: o.result.thread.id });
         if (typeof o.result.model === "string" && o.result.model) out.push({ t: "model", model: o.result.model });
         // How much of the plan is left is asked along the way: it costs nothing and needs no turn.
@@ -86,7 +107,7 @@ function codexParser(prompt: string, sessionId: string | undefined, opts: RunOpt
         out.push(startThread());
       } else if ((o.id === 1 || o.id === 2 || o.id === 3) && o.error) {
         failed = true;
-        out.push({ t: "error", message: o.error.message ?? "Codex refused the request." }, ...end());
+        out.push({ t: "error", message: o.error.message ?? "Codex refused the request." }, ...close());
       } else if (o.method && o.id !== undefined) {
         // A request from Codex: it waits until this is answered.
         const id = String(o.id);
@@ -150,7 +171,7 @@ function codexParser(prompt: string, sessionId: string | undefined, opts: RunOpt
           failed = true;
           out.push({ t: "error", message: turn.error?.message ?? (warning || "Codex stopped with an error.") });
         }
-        out.push(...end());
+        out.push(...close());
       }
       return out;
     },
@@ -158,6 +179,8 @@ function codexParser(prompt: string, sessionId: string | undefined, opts: RunOpt
       return [];
     },
     exit(code) {
+      // The turn was done; only the archive was cut short.
+      if (closing) return end();
       if (!ended && !failed) return [{ t: "error", message: warning || `Codex stopped before it finished${code ? ` (code ${code})` : ""}.` }];
       return [];
     },
@@ -200,6 +223,9 @@ function shots(content: unknown, label: string): Ev[] {
 
 /** The number Cube gives its question to Codex about the plan's limits. */
 const LIMITS_ID = 9;
+/** The numbers of Cube's requests to take a thread out of Codex's archive and to put it back. */
+const UNARCHIVE_ID = 8;
+const ARCHIVE_ID = 10;
 
 /** An agent's list of what it is going to do, whichever words its program has for where each line stands. */
 export function todos(raw: { text: unknown; state: unknown }[]): Todo[] {
